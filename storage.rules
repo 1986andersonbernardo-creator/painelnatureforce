@@ -1,0 +1,28 @@
+rules_version = '2';
+
+// ==================== REGRAS DE SEGURANÇA — FIREBASE STORAGE (PDFs de faturas) ====================
+// Os arquivos de fatura (PDF original) ficam isolados por cliente/UC.
+// Um cliente só lê o próprio PDF; o upload é feito pelo administrador.
+// Caminho: faturas/{clienteId}/{unidadeConsumidoraId}/{arquivo}
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAdmin() {
+      return request.auth != null &&
+             (request.auth.token.admin == true ||
+              request.auth.token.email in ['admin@natureforce.com']);
+    }
+
+    // Cliente autenticado pode ler apenas os arquivos de sua própria pasta (clienteId == uid)
+    match /faturas/{clienteId}/{unidadeConsumidoraId}/{arquivo} {
+      allow read: if request.auth != null && request.auth.uid == clienteId;
+      allow write: if isAdmin();
+    }
+
+    // Negação padrão para qualquer outro caminho
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
