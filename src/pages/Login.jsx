@@ -156,14 +156,19 @@ export function LoginAdmin() {
     password: 'admin123',
   })
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault()
-    const result = loginAdmin(form.email, form.password)
+    setError('')
+    setLoading(true)
+    // loginAdmin autentica no Firebase (async) — é obrigatório aguardar.
+    const result = await loginAdmin(form.email, form.password)
+    setLoading(false)
     if (result.ok) {
       navigate('/admin/dashboard')
     } else {
-      setError(result.message)
+      setError(result.message || 'Não foi possível entrar. Tente novamente.')
     }
   }
 
@@ -206,8 +211,8 @@ export function LoginAdmin() {
 
         {error ? <p className="login-error">{error}</p> : null}
 
-        <button type="submit" className="primary-button large-btn">
-          Entrar
+        <button type="submit" className="primary-button large-btn" disabled={loading}>
+          {loading ? 'Entrando...' : 'Entrar'}
         </button>
 
         <Link to="/login" className="auth-switch-link">
