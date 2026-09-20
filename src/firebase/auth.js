@@ -48,6 +48,7 @@ export const loginComEmail = async (email, senha) => {
 //
 // Importante: esta função NUNCA cria contas (createUserWithEmailAndPassword);
 // apenas entra com uma conta já provisionada no Firebase Authentication.
+// @returns {{ok:boolean, user?:Object, claimAdmin?:boolean, motivo?:string, message?:string}}
 export const entrarComoSessaoAdmin = async (email, senha) => {
   try {
     const userCredential = await signInWithEmailAndPassword(auth, email.trim(), senha)
@@ -65,7 +66,43 @@ export const entrarComoSessaoAdmin = async (email, senha) => {
 
     return { ok: true, user: usuario, claimAdmin }
   } catch (error) {
-    return { ok: false, motivo: error?.code || 'auth/erro-desconhecido' }
+    const motivo = error?.code || 'auth/erro-desconhecido'
+    // Mensagem PRECISA para cada motivo — o administrador precisa saber o que
+    // fazer (especialmente quando a conta ainda não existe no Firebase Auth).
+    let message
+    switch (motivo) {
+      case 'auth/user-not-found':
+        message =
+          'Esta conta ainda NÃO existe no Firebase Authentication. Crie-a no Console do Firebase (Authentication → Users → Add user) com o MESMO e-mail e senha usados aqui.'
+        break
+      case 'auth/invalid-credential':
+      case 'auth/wrong-password':
+        message =
+          'A senha não corresponde à conta administrativa do Firebase. Atualize a senha no Console (Authentication → Users → redefinir) para a senha usada aqui.'
+        break
+      case 'auth/invalid-email':
+        message = 'E-mail inválido. Verifique o formato.'
+        break
+      case 'auth/user-disabled':
+        message = 'Esta conta está desativada no Firebase. Reative-a no Console (Authentication → Users).'
+        break
+      case 'auth/operation-not-allowed':
+        message =
+          'O provedor E-mail/Senha está DESATIVADO no Firebase. Ative em Authentication → Sign-in method → Email/Password.'
+        break
+      case 'auth/too-many-requests':
+        message = 'Muitas tentativas. Aguarde alguns minutos e tente novamente.'
+        break
+      case 'auth/network-request-failed':
+        message = 'Sem conexão com a internet. Verifique sua rede.'
+        break
+      case 'auth/invalid-api-key':
+        message = 'Configuração do Firebase inválida (apiKey). Verifique as variáveis de ambiente.'
+        break
+      default:
+        message = 'Erro ao autenticar no Firebase. Tente novamente.'
+    }
+    return { ok: false, motivo, message }
   }
 }
 

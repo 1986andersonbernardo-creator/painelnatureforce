@@ -531,6 +531,21 @@ export function AuthProvider({ children }) {
     }
 
     // ===== 2. Fallback local (excepcional) =====
+    // APENAS quando o Firebase Authentication não pôde ser alcançado (sem
+    // internet) OU quando a conta ainda NÃO existe lá. Quando o Firebase
+    // REJEITA as credenciais (senha inválida, conta desativada, provedor
+    // desligado), o fallback NÃO é aplicado: a decisão do Firebase prevalece —
+    // caso contrário uma senha antiga no cache local abriria um banco que o
+    // Firebase está negando (falha de segurança).
+    const fallbackPermitido =
+      sessaoBanco.motivo === 'auth/user-not-found' ||
+      sessaoBanco.motivo === 'auth/network-request-failed' ||
+      sessaoBanco.motivo === 'auth/erro-desconhecido'
+
+    if (!fallbackPermitido) {
+      return { ok: false, message: sessaoBanco.message || 'Credenciais inválidas. Verifique e-mail e senha.' }
+    }
+
     // Mantém o acesso administrativo quando NÃO há sessão no Firebase (ex.: sem
     // internet, ou conta ainda não provisionada). NESTE MODO as alterações
     // ficam restritas a este navegador e o painel avisa explicitamente — nunca
@@ -541,7 +556,12 @@ export function AuthProvider({ children }) {
     )
 
     if (!usuario) {
-      return { ok: false, message: 'Credenciais inválidas. Verifique e-mail e senha.' }
+      return {
+        ok: false,
+        message:
+          sessaoBanco.message ||
+          'Credenciais inválidas. Verifique e-mail e senha.',
+      }
     }
 
     const novaSessao = {
@@ -558,7 +578,7 @@ export function AuthProvider({ children }) {
     aplicarSessao(novaSessao)
     logar('Login administrativo (local)', `${usuario.nome} (${usuario.perfil})`, usuario.nome)
     registrarFalhaSync(
-      'Sessão administrativa SEM acesso ao banco compartilhado. As alterações ficam salvas apenas neste navegador. Provisione a conta no Firebase Authentication (mesmo e-mail e senha) para sincronizar.',
+      'Sessão administrativa SEM acesso ao banco compartilhado. As alterações ficam salvas APENAS neste navegador. Para sincronizar: 1) abra o Console do Firebase → Authentication → Sign-in method → ative Email/Password; 2) em Authentication → Users → Add user, crie a conta com este MESMO e-mail e senha; 3) entre novamente.',
       sessaoBanco.motivo || 'admin/sem-sessao-banco',
     )
     return { ok: true, sincronizadoBanco: false }

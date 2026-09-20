@@ -127,6 +127,22 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // ==================== USUÁRIOS ADMINISTRATIVOS ====================
+    // Coleção gerenciada pelo painel administrativo (tela de Usuários).
+    // A SENHA nunca é gravada aqui (credenciais vivem no Firebase Auth) —
+    // ver usuarioParaBanco() em services/persistencia.js.
+    // Somente administradores leem/gravam: é o cadastro que define perfis.
+    match /usuarios/{usuarioId} {
+      allow read, write: if isAdmin();
+    }
+
+    // ==================== LOGS DE AUDITORIA ====================
+    // Histórico de ações compartilhado entre dispositivos.
+    // Somente administradores (os logs são gravados pelo painel autenticado).
+    match /logs/{logId} {
+      allow read, write: if isAdmin();
+    }
+
     // ==================== NEGAÇÃO PADRÃO ====================
     // Qualquer outra coleção/documento é negado por padrão.
     match /{document=**} {
