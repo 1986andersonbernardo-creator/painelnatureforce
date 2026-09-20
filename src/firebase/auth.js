@@ -39,6 +39,36 @@ export const loginComEmail = async (email, senha) => {
   }
 }
 
+// ==================== Sessão Firebase do administrador ====================
+// O login administrativo continua validando as credenciais na lista local
+// (comportamento existente), mas TENTA obter uma sessão Firebase com as mesmas
+// credenciais. Sem sessão Firebase o Firestore nega qualquer escrita
+// (request.auth == null) — era essa a causa das alterações administrativas
+// serem "salvas" e depois reaparecerem os dados antigos.
+//
+// Importante: esta função NUNCA cria contas (createUserWithEmailAndPassword);
+// apenas entra com uma conta já provisionada no Firebase Authentication.
+export const entrarComoSessaoAdmin = async (email, senha) => {
+  try {
+    const userCredential = await signInWithEmailAndPassword(auth, email.trim(), senha)
+    const usuario = userCredential.user
+
+    // O perfil administrativo é dado pelo e-mail na lista de administradores
+    // (mesma regra usada nas Firestore Security Rules) ou pelo custom claim.
+    let claimAdmin = false
+    try {
+      const token = await usuario.getIdTokenResult()
+      claimAdmin = token?.claims?.admin === true
+    } catch {
+      claimAdmin = false
+    }
+
+    return { ok: true, user: usuario, claimAdmin }
+  } catch (error) {
+    return { ok: false, motivo: error?.code || 'auth/erro-desconhecido' }
+  }
+}
+
 // Logout
 export const logoutFirebase = async () => {
   try {

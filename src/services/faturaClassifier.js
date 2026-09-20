@@ -16,6 +16,74 @@ const paraNumero = (valor) => {
   return isNaN(num) ? null : num
 }
 
+// ==================== Extração da UC (Unidade Consumidora) ====================
+// A UC é o identificador PRINCIPAL de uma fatura. Nas faturas reais o rótulo e
+// o valor quase sempre ficam em LINHAS DIFERENTES:
+//
+//   NÚMERO DA UNIDADE CONSUMIDORA
+//   1234567890
+//
+// Por isso a extração precisa do texto com as linhas reconstruídas
+// (ver pdfTextLayout.reconstruirLinhas).
+
+// Rótulo da UC/instalação sozinho na linha (o valor vem na linha seguinte).
+const RE_UC_ROTULO =
+  /^\s*(?:n[úu]mero\s+(?:da|de)\s+)?(?:unidade\s+consumidora(?:\s*\(uc\))?|uc|c[óo]digo\s+da\s+instala[cç][ãa]o)\s*[:\-.]?\s*$/i
+
+// Valor "solto" na linha seguinte: "1234567890", "2.014.249.014-06"
+// Exige pelo menos 6 dígitos para não confundir com códigos curtos de tabela.
+const RE_UC_VALOR_LINHA = /^\s*(\d[\d.\-/\s]{5,25}\d)\s*$/
+
+/**
+ * Tenta extrair a UC a partir de uma linha e da linha seguinte.
+ * @param {string} linha - Linha atual (já reconstruída)
+ * @param {string} [proximaLinha] - Linha imediatamente abaixo
+ * @returns {{ uc: string, confianca: 'CONFIRMADO' }|null}
+ */
+export const extrairUCDaLinha = (linha, proximaLinha = '') => {
+  const l = String(linha ?? '').trim()
+  if (!l) return null
+
+  // (1) Formato explícito na MESMA linha: "UC 123456789"
+  //     ou "Unidade Consumidora: 123456789"
+  let m = l.match(
+    /(?:^|\b)(?:UC|Unidade Consumidora|Unidade Consumidora \(UC\))[:\s nºº]*([0-9][0-9.\-\s]{5,20}[0-9])/i,
+  )
+  if (m) return { uc: m[1].replace(/[^\d]/g, ''), confianca: 'CONFIRMADO' }
+
+  // (2) "numero da unidade consumidora e 2.014.249.014-06"
+  m = l.match(
+    /(?:n[uú]mero da unidade consumidora|[uú]nidade consumidora)[:\s]*(?:[ée])?\s*([0-9][0-9.\-/]{5,25})/i,
+  )
+  if (m) return { uc: m[1].replace(/[^\d]/g, ''), confianca: 'CONFIRMADO' }
+
+  // (3) Rótulo em uma linha e VALOR na linha seguinte (layout mais comum)
+  if (RE_UC_ROTULO.test(l)) {
+    const mv = String(proximaLinha ?? '').trim().match(RE_UC_VALOR_LINHA)
+    if (mv) return { uc: mv[1].replace(/[^\d]/g, ''), confianca: 'CONFIRMADO' }
+  }
+
+  return null
+}
+
+/**
+ * Percorre todo o texto (linha a linha, com a linha seguinte como apoio)
+ * e devolve a primeira UC confiável encontrada.
+ * @param {string} texto - Texto extraído do PDF (linhas preservadas)
+ * @returns {{ uc: string, confianca: 'CONFIRMADO' }|null}
+ */
+export const extrairUC = (texto) => {
+  if (!texto) return null
+
+  const linhas = String(texto).split('\n')
+  for (let i = 0; i < linhas.length; i++) {
+    const encontrada = extrairUCDaLinha(linhas[i], linhas[i + 1] || '')
+    if (encontrada) return encontrada
+  }
+
+  return null
+}
+
 /**
  * Classifica os componentes da fatura a partir do texto extraído do PDF.
  * Processa linha por linha para identificar os itens da fatura.
@@ -100,19 +168,12 @@ export const classificarFatura = (texto) => {
 
     // UC / Código da instalação
     if (!componentes.uc) {
-      // Formato explícito: "UC 123456789" / "Unidade Consumidora: 123456789"
-      let m = l.match(/(?:^|\b)(?:UC|Unidade Consumidora|Unidade Consumidora \(UC\))[:\s nºº]*([0-9][0-9.\-\s]{5,20}[0-9])/i)
-      if (m) {
-        componentes.uc = m[1].replace(/[^\d]/g, '')
-        confiancas.uc = 'CONFIRMADO'
-      }
-    }
-    if (!componentes.uc) {
-      // "numero da unidade consumidora e 2.014.249.014-06"
-      const m = l.match(/(?:n[uú]mero da unidade consumidora|[uú]nidade consumidora)[:\s]*(?:[ée])?\s*([0-9][0-9.\-/]{5,25})/i)
-      if (m) {
-        componentes.uc = m[1].replace(/[^\d]/g, '')
-        confiancas.uc = 'CONFIRMADO'
+      // Mesma linha ("UC 123456789") ou valor na LINHA SEGUINTE
+      // ("NÚMERO DA UNIDADE CONSUMIDORA" \n "1234567890").
+      const ucEncontrada = extrairUCDaLinha(l, proxima)
+      if (ucEncontrada) {
+        componentes.uc = ucEncontrada.uc
+        confiancas.uc = ucEncontrada.confianca
       }
     }
     if (!componentes.uc && componentes.numeroCliente) {
@@ -250,6 +311,14 @@ export const classificarFatura = (texto) => {
       if (m) {
         componentes.consumo = paraNumero(m[1])
         confiancas.consumo = 'REVISAR'
+      } else {
+        // Formato: "CONSUMO FATURADO" \n "188,75" (valor na LINHA SEGUINTE)
+        const mRotulo = l.match(/(?:CONSUMO FATURADO|Consumo|Energia consumida)\s*[:\s]*$/i)
+        const mValor = proxima.match(/^([0-9][0-9.,]*)\s*(?:k?wh)?$/i)
+        if (mRotulo && mValor) {
+          componentes.consumo = paraNumero(mValor[1])
+          confiancas.consumo = 'REVISAR'
+        }
       }
     }
 

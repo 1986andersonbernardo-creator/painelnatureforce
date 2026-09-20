@@ -14,6 +14,11 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // Helper: é um usuário autenticado administrador?
+    // Suporta as duas formas de autorização:
+    //   1. custom claim `admin: true` (recomendado em produção);
+    //   2. e-mail presente na lista de administradores abaixo.
+    // A lista deve conter os e-mails usados em /admin/login — caso contrário o
+    // administrador fica sem permissão de escrita e as alterações não persistem.
     function isAdmin() {
       return request.auth != null &&
              (request.auth.token.admin == true ||
@@ -28,11 +33,15 @@ service cloud.firestore {
     // ==================== CLIENTES ====================
     // O documento é identificado pelo UID do usuário autenticado.
     // O cliente só pode ler/alterar o próprio documento.
+    // O ADMINISTRADOR também pode alterar/criar o cadastro do cliente — sem
+    // isso, toda alteração feita na Área Administrativa era negada pelo banco
+    // e o dado antigo reaparecia após recarregar a página.
     match /clientes/{clienteId} {
       allow read: if isOwner(clienteId) || isAdmin();
 
-      allow create: if isOwner(clienteId)
-                    && request.resource.data.email == request.auth.token.email;
+      allow create: if (isOwner(clienteId)
+                    && request.resource.data.email == request.auth.token.email)
+                    || isAdmin();
 
       allow update: if isOwner(clienteId) || isAdmin();
 

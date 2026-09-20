@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../../context/AuthContext'
 import { salvarArquivo as salvarArquivoDB } from '../../store/db'
@@ -6,6 +6,8 @@ import logo from '../../assets/logo.png'
 import { calcularHashArquivo, gerarChaveDedupe, encontrarFaturaDuplicada, normalizarUC, montarChaveIdempotencia, gerarIdFatura } from '../../services/faturaDedup'
 import { identificarFatura, DECISAO } from '../../services/faturaIdentificacao'
 import { STATUS_FATURA, MOTIVO_REVISAO, ROTULO_MOTIVO_REVISAO } from '../../services/faturaStatus'
+// Validação por CONTEÚDO (assinatura "%PDF-") — não por MIME.
+import { validarArquivoPDF } from '../../services/pdfValidacao'
 
 const formatCurrency = (value) =>
   new Intl.NumberFormat('pt-BR', {
@@ -13,12 +15,38 @@ const formatCurrency = (value) =>
     currency: 'BRL',
   }).format(value)
 
+/**
+ * Mantém o estado local da seção em sincronia com o cache que recebe as
+ * atualizações do BANCO CENTRAL (onSnapshot → dadosVersao).
+ *
+ * As seções mantêm uma cópia em estado para não travar formulários abertos;
+ * esta cópia é atualizada automaticamente sempre que o Firestore entrega dados
+ * novos (alteração feita em outro dispositivo) — antes, a seção ficava
+ * congelada no valor lido no primeiro render.
+ * @param {() => any} ler Leitor do cache local (getStore)
+ * @param {any} inicial Valor lido no primeiro render
+ * @returns {[any, (v:any) => void, () => void]}
+ */
+function useDadosSincronizados(ler, inicial) {
+  const { dadosVersao } = useAuth()
+  const [dados, setDados] = useState(inicial)
+  const versaoRef = useRef(dadosVersao)
+
+  useEffect(() => {
+    if (versaoRef.current === dadosVersao) return
+    versaoRef.current = dadosVersao
+    setDados(ler())
+  }, [dadosVersao, ler])
+
+  return [dados, setDados, () => setDados(ler())]
+}
+
 // Limites de validação de arquivo
 const TAMANHO_MAX_PDF_MB = 20
 const TAMANHO_MAX_PDF_BYTES = TAMANHO_MAX_PDF_MB * 1024 * 1024
 
 export function AdminDashboard() {
-  const { session, logout, getClientes, getFaturas, getUnidades, getUsuarios, getLogs, getPreCadastros } = useAuth()
+  const { session, logout, getClientes, getFaturas, getUnidades, getUsuarios, getLogs, getPreCadastros, estadoSync, recarregarDadosCompartilhados, dadosVersao } = useAuth()
   const [activeMenu, setActiveMenu] = useState('dashboard')
   const [busca, setBusca] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
@@ -378,6 +406,48 @@ export function AdminDashboard() {
           )}
         </div>
 
+        {/* ==================== Estado da sincronização com o BANCO CENTRAL ==================== */}
+        {/* Avisa explicitamente quando as alterações NÃO estão chegando ao
+            Firestore — sem isso o administrador acha que salvou e o dado fica
+            preso no cache local deste navegador (celular ≠ computador). */}
+        {(estadoSync.erro || estadoSync.modo !== 'firestore' || estadoSync.sincronizando) && (
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: '8px 16px',
+              padding: '10px 14px',
+              marginBottom: '16px',
+              borderRadius: '10px',
+              background: estadoSync.erro ? '#fef2f2' : '#f0fdf4',
+              border: `1px solid ${estadoSync.erro ? '#fecaca' : '#bbf7d0'}`,
+            }}
+          >
+            <span
+              className={`status-pill ${estadoSync.erro ? 'error' : 'success'}`}
+              style={{ background: 'transparent', border: 'none' }}
+            >
+              {estadoSync.erro
+                ? '⚠ Sem sincronização com o banco central'
+                : estadoSync.sincronizando
+                  ? 'Sincronizando com o banco central...'
+                  : '✓ Sincronizado com o banco central'}
+            </span>
+            {estadoSync.erro && (
+              <small style={{ color: '#b91c1c', flex: 1, minWidth: '220px' }}>{estadoSync.erro}</small>
+            )}
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => recarregarDadosCompartilhados()}
+              disabled={estadoSync.sincronizando}
+            >
+              Sincronizar agora
+            </button>
+          </div>
+        )}
+
         {renderContent()}
       </main>
     </div>
@@ -398,7 +468,7 @@ function ClientesSection() {
     updateUnidade,
     removeUnidade,
   } = useAuth()
-  const [clientes, setClientes] = useState(getClientes())
+  const [clientes, setClientes] = useDadosSincronizados(getClientes, getClientes())
   const [showForm, setShowForm] = useState(false)
   const [editandoId, setEditandoId] = useState(null)
   const [mensagem, setMensagem] = useState('')
@@ -889,9 +959,10 @@ function FaturasSection() {
     normalizarVenc,
     addPreCadastro,
     session,
+    logar,
   } = useAuth()
 
-  const [faturas, setFaturas] = useState(getFaturas())
+  const [faturas, setFaturas] = useDadosSincronizados(getFaturas, getFaturas())
   const [mensagem, setMensagem] = useState('')
   const [mensagemErro, setMensagemErro] = useState('')
   const [processando, setProcessando] = useState(false)
@@ -904,6 +975,43 @@ function FaturasSection() {
   useEffect(() => {
     return () => setProcessando(false)
   }, [])
+
+  // Status da fila conforme o motivo da revisão (a UC pode ter sido lida
+  // corretamente e simplesmente não estar cadastrada — é diferente de
+  // "UC não identificada no PDF").
+  const statusPorMotivo = {
+    [MOTIVO_REVISAO.UC_NAO_ENCONTRADA]: 'UC_NAO_CADASTRADA',
+    [MOTIVO_REVISAO.UC_SEM_CLIENTE]: 'UC_SEM_CLIENTE',
+    [MOTIVO_REVISAO.MULTIPLAS_UCS]: 'MULTIPLAS_UCS',
+    [MOTIVO_REVISAO.CLIENTE_INCOMPATIVEL]: 'CLIENTE_INCOMPATIVEL',
+    [MOTIVO_REVISAO.UC_AUSENTE_NO_PDF]: 'UC_NAO_IDENTIFICADA',
+    [MOTIVO_REVISAO.SEM_DADOS_IDENTIFICACAO]: 'UC_NAO_IDENTIFICADA',
+  }
+
+  /**
+   * Explica em linguagem clara por que a fatura foi para revisão manual.
+   * @param {string} motivo - MOTIVO_REVISAO
+   * @param {string} uc - UC lida do PDF (quando houver)
+   * @returns {string}
+   */
+  const explicacaoMotivo = (motivo, uc) => {
+    switch (motivo) {
+      case MOTIVO_REVISAO.UC_NAO_ENCONTRADA:
+        return `UC ${uc || '—'} lida no PDF, mas não cadastrada no sistema. Cadastre a unidade para vincular a fatura.`
+      case MOTIVO_REVISAO.UC_AUSENTE_NO_PDF:
+        return 'O número da UC não foi localizado no texto do PDF. Se o arquivo for digitalizado (imagem), não há texto extraível — envie o PDF original da distribuidora.'
+      case MOTIVO_REVISAO.MULTIPLAS_UCS:
+        return `Mais de uma unidade cadastrada corresponde à UC ${uc || '—'}. Confirme manualmente qual é a correta.`
+      case MOTIVO_REVISAO.UC_SEM_CLIENTE:
+        return `A UC ${uc || '—'} existe, mas não tem cliente vinculado. Vincule um cliente para liberar a fatura.`
+      case MOTIVO_REVISAO.CLIENTE_INCOMPATIVEL:
+        return `Os dados do titular (CPF/CNPJ) não conferem com a UC ${uc || '—'}. Confirme manualmente antes de vincular.`
+      case MOTIVO_REVISAO.SEM_DADOS_IDENTIFICACAO:
+        return 'Nenhum dado de identificação (UC, titular, medidor ou endereço) foi encontrado no texto do PDF.'
+      default:
+        return 'Identificação pendente de conferência manual.'
+    }
+  }
 
   // Helper: aplica timeout em promises que podem ficar pendentes (ex: Firestore sem permissão)
   const comTimeout = (promise, ms = 8000, mensagem = 'Operação demorou demais.') =>
@@ -947,11 +1055,18 @@ function FaturasSection() {
       const { key } = item
 
       try {
-        // ===== 1. Validação do arquivo =====
-        const ehPDF =
-          file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
-        if (!ehPDF) {
-          atualizarItem(key, { status: 'ERRO', erro: 'Arquivo não é um PDF.' })
+        // ===== 1. Validação do arquivo (por CONTEÚDO, não por MIME) =====
+        // `file.type` é não confiável: vem vazio, 'application/octet-stream'
+        // ou MIME errado em vários navegadores/SO — e um .txt renomeado para
+        // .pdf passa com type 'application/pdf'. A assinatura "%PDF-" resolve.
+        const validacaoArquivo = await validarArquivoPDF(file)
+        if (!validacaoArquivo.ok) {
+          atualizarItem(key, { status: 'ERRO', erro: validacaoArquivo.mensagem })
+          logar(
+            'ARQUIVO_INVALIDO',
+            `${file.name} (${validacaoArquivo.codigo}): ${validacaoArquivo.mensagem}`,
+            session?.nome || 'Sistema',
+          )
           continue
         }
         if (file.size > TAMANHO_MAX_PDF_BYTES) {
@@ -976,6 +1091,38 @@ function FaturasSection() {
           'Tempo limite excedido no processamento do PDF.',
         )
         adicionarPasso(key, '✓ PDF processado')
+
+        // ===== 3.1 Falha de LEITURA do PDF → mensagem real para o usuário =====
+        // Sem isso, um PDF escaneado (sem camada de texto), corrompido ou
+        // protegido por senha caía no ramo de "UC não identificada" e o motivo
+        // real nunca aparecia para o admin.
+        if (resultado.status === 'erro' || !resultado.componentes) {
+          const motivoLeitura = resultado.erro || 'Não foi possível extrair o texto da fatura.'
+          atualizarItem(key, { status: 'ERRO', erro: motivoLeitura })
+          adicionarPasso(key, '✗ Leitura do PDF não concluída')
+          logar(
+            'ERRO_EXTRACAO_PDF',
+            `Fatura ${file.name}: ${motivoLeitura}`,
+            session?.nome || 'Sistema',
+          )
+          // Registra a revisão para o admin ter rastreabilidade do arquivo.
+          try {
+            await comTimeout(
+              criarRevisao({
+                faturaId: null,
+                arquivo: file.name,
+                clienteId: null,
+                clienteNome: null,
+                motivo: motivoLeitura,
+                camposFaltantes: resultado.completude?.faltantes || ['Leitura do PDF'],
+              }),
+              8000,
+            )
+          } catch (e) {
+            console.warn('Firestore indisponível — revisão não registrada:', e.message)
+          }
+          continue
+        }
 
         const componentes = resultado.componentes || {}
         const calculo = resultado.calculo || null
@@ -1002,7 +1149,7 @@ function FaturasSection() {
             cliente: duplicada.clienteNome || '—',
             erro: `Fatura já existe no sistema (${duplicada.arquivo}).`,
           })
-          registrarLog(
+          logar(
             'FATURA_DUPLICADA',
             `Fatura ${file.name} duplicada de ${duplicada.arquivo}`,
             session?.nome || 'Sistema',
@@ -1040,13 +1187,31 @@ function FaturasSection() {
         }
 
         // ===== 8. Salva o PDF no IndexedDB =====
-        const reader = new FileReader()
-        const dataUrl = await new Promise((resolve) => {
-          reader.onload = () => resolve(reader.result)
-          reader.readAsDataURL(file)
-        })
+        // A leitura é aguardada corretamente e possui tratamento de erro:
+        // antes, sem `onerror`, a Promise nunca resolvia se a leitura falhasse.
+        let dataUrl = null
+        try {
+          dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = () => resolve(reader.result)
+            reader.onerror = () =>
+              reject(reader.error || new Error('Falha ao ler o arquivo para armazenamento local.'))
+            reader.onabort = () => reject(new Error('Leitura do arquivo cancelada.'))
+            reader.readAsDataURL(file)
+          })
+        } catch (e) {
+          console.warn('Falha ao preparar o arquivo para armazenamento local:', e.message)
+        }
+
         const id = Date.now() + Math.random()
-        await salvarArquivoDB(id, dataUrl)
+        if (dataUrl) {
+          try {
+            await salvarArquivoDB(id, dataUrl)
+          } catch (e) {
+            // Não bloqueia o registro da fatura: o arquivo é um extra.
+            console.warn('Falha ao salvar o PDF no IndexedDB:', e.message)
+          }
+        }
 
         // ===== 9. Monta os dados da fatura =====
         const dadosFatura = {
@@ -1134,7 +1299,7 @@ function FaturasSection() {
             cliente: clienteDestino.nome,
             faturaId: resultadoLocal.ok ? resultadoLocal.fatura.id : null,
           })
-          registrarLog(
+          logar(
             'UC_IDENTIFICADA',
             `Fatura ${file.name} vinculada automaticamente ao cliente ${clienteDestino.nome} (UC ${ucExtraida})`,
             session?.nome || 'Sistema',
@@ -1169,10 +1334,14 @@ function FaturasSection() {
           )
 
           if (pre.ok) {
-            adicionarPasso(key, '⚠ Novo cliente identificado — aguardando revisão')
+            adicionarPasso(
+              key,
+              `⚠ UC ${ucExtraida} não cadastrada — pré-cadastro criado para revisão`,
+            )
             atualizarItem(key, {
               status: 'NOVO_CLIENTE',
               cliente: componentes.cliente || `UC ${ucExtraida}`,
+              erro: explicacaoMotivo(decisao.motivo, ucExtraida),
             })
           } else if (pre.duplicado && pre.duplicado.nome) {
             // Já existe pré-cadastro pendente para essa UC — vincula a fatura a ele
@@ -1196,8 +1365,13 @@ function FaturasSection() {
           // NUNCA criar/associar cliente automaticamente nesses casos.
           const motivo = ROTULO_MOTIVO_REVISAO[decisao.motivo] || 'identificação pendente'
           adicionarPasso(key, `⚠ ${motivo} — enviado para revisão manual`)
-          atualizarItem(key, { status: 'UC_NAO_IDENTIFICADA', cliente: null })
-          registrarLog(
+          atualizarItem(key, {
+            // Distingue "UC lida mas não cadastrada" de "UC não identificada no PDF"
+            status: statusPorMotivo[decisao.motivo] || 'UC_NAO_IDENTIFICADA',
+            cliente: null,
+            erro: explicacaoMotivo(decisao.motivo, ucExtraida),
+          })
+          logar(
             'ERRO_PROCESSAMENTO',
             `Fatura ${file.name} enviada para revisão manual (${decisao.motivo || 'UC ausente no PDF'})`,
             session?.nome || 'Sistema',
@@ -1255,6 +1429,12 @@ function FaturasSection() {
     NOVO_CLIENTE: { texto: 'Novo cliente', classe: 'tag tag-warning' },
     PENDENTE_REVISÃO: { texto: 'Pendente revisão', classe: 'tag tag-warning' },
     DUPLICADA: { texto: 'Duplicada', classe: 'tag tag-error' },
+    // Motivos distintos de revisão — antes todos apareciam como
+    // "UC não identificada", mesmo quando a UC havia sido lida corretamente.
+    UC_NAO_CADASTRADA: { texto: 'UC não cadastrada', classe: 'tag tag-warning' },
+    UC_SEM_CLIENTE: { texto: 'UC sem cliente vinculado', classe: 'tag tag-warning' },
+    MULTIPLAS_UCS: { texto: 'Múltiplas UCs possíveis', classe: 'tag tag-warning' },
+    CLIENTE_INCOMPATIVEL: { texto: 'Cliente incompatível', classe: 'tag tag-error' },
     UC_NAO_IDENTIFICADA: { texto: 'UC não identificada', classe: 'tag tag-error' },
     ERRO: { texto: 'Erro', classe: 'tag tag-error' },
   }
@@ -1498,7 +1678,7 @@ function PreCadastrosSection() {
     updatePreCadastro,
     session,
   } = useAuth()
-  const [preCadastros, setPreCadastros] = useState(getPreCadastros())
+  const [preCadastros, setPreCadastros] = useDadosSincronizados(getPreCadastros, getPreCadastros())
   const [emRevisao, setEmRevisao] = useState(null) // pré-cadastro aberto no modal
   const [mensagem, setMensagem] = useState('')
 
@@ -1777,7 +1957,7 @@ function ModalRevisaoPreCadastro({ preCadastro, onCancelar, onSalvarPendente, on
 /* ======================== SEÇÃO REVISÕES ======================== */
 function RevisoesSection() {
   const { getFaturas, updateFatura, removeFatura } = useAuth()
-  const [faturas, setFaturas] = useState(getFaturas())
+  const [faturas, setFaturas] = useDadosSincronizados(getFaturas, getFaturas())
   const [mensagem, setMensagem] = useState('')
 
   const refresh = () => setFaturas(getFaturas())
@@ -1872,7 +2052,7 @@ function RevisoesSection() {
 /* ======================== SEÇÃO USUÁRIOS ======================== */
 function UsuariosSection() {
   const { getUsuarios, addUsuario, removeUsuario, session } = useAuth()
-  const [usuarios, setUsuarios] = useState(getUsuarios())
+  const [usuarios, setUsuarios] = useDadosSincronizados(getUsuarios, getUsuarios())
   const [showForm, setShowForm] = useState(false)
   const [mensagem, setMensagem] = useState('')
   const [form, setForm] = useState({ nome: '', email: '', senha: '', perfil: 'operador' })

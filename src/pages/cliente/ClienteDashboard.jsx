@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../../context/AuthContext'
-import { obterArquivo } from '../../store/db'
+import { obterArquivo, getStore, setStore } from '../../store/db'
 import logo from '../../assets/logo.png'
 import {
-  getFaturasDoCliente,
-  getUnidadesDoCliente,
   getChamadosDoCliente,
   criarChamado,
   atualizarCliente,
+  observarFaturasDoCliente,
+  observarUnidadesDoCliente,
+  observarClientePorUid,
 } from '../../firebase/firestore'
 
 const formatCurrency = (value) =>
@@ -26,60 +27,68 @@ export function ClienteDashboard() {
   const [salvo, setSalvo] = useState(false)
   const [loading, setLoading] = useState(true)
   const [erroDados, setErroDados] = useState('')
+  const [erroSalvamento, setErroSalvamento] = useState('')
+  const [erroTicket, setErroTicket] = useState('')
   const [faturasFirestore, setFaturasFirestore] = useState([])
   const [unidadesFirestore, setUnidadesFirestore] = useState([])
   const [chamadosFirestore, setChamadosFirestore] = useState([])
+  const [clienteFirestore, setClienteFirestore] = useState(null)
 
   const uid = session?.uid || session?.clienteId
 
-  // Carrega dados do Firestore filtrados pelo UID autenticado
+  // ==================== Sincronização em tempo real ====================
+  // onSnapshot: o que o administrador alterar (em qualquer dispositivo) chega
+  // aqui automaticamente, sem recarregar a página. O Firestore é a FONTE DA
+  // VERDADE; o cache local é fallback apenas para sessões sem Firebase.
   useEffect(() => {
-    let ativo = true
-
-    const carregarDados = async () => {
-      if (!uid) {
-        setLoading(false)
-        return
-      }
-
-      setLoading(true)
-      setErroDados('')
-
-      try {
-        // Busca faturas do cliente autenticado
-        const resultadoFaturas = await getFaturasDoCliente(uid)
-        if (ativo && resultadoFaturas.ok) {
-          setFaturasFirestore(resultadoFaturas.data)
-        }
-
-        // Busca unidades do cliente autenticado
-        const resultadoUnidades = await getUnidadesDoCliente(uid)
-        if (ativo && resultadoUnidades.ok) {
-          setUnidadesFirestore(resultadoUnidades.data)
-        }
-
-        // Busca chamados do cliente autenticado
-        const resultadoChamados = await getChamadosDoCliente(uid)
-        if (ativo && resultadoChamados.ok) {
-          setChamadosFirestore(resultadoChamados.data)
-        }
-      } catch {
-        if (ativo) {
-          setErroDados('Não foi possível carregar seus dados. Verifique sua conexão.')
-        }
-      } finally {
-        if (ativo) setLoading(false)
-      }
+    if (!uid) {
+      setLoading(false)
+      return undefined
     }
 
-    carregarDados()
+    setErroDados('')
+    setLoading(true)
+
+    const desobservarFaturas = observarFaturasDoCliente(uid, (resultado) => {
+      if (resultado.ok) setFaturasFirestore(resultado.data)
+      else setErroDados(resultado.message || 'Não foi possível carregar suas faturas.')
+      setLoading(false)
+    })
+
+    const desobservarUnidades = observarUnidadesDoCliente(uid, (resultado) => {
+      if (resultado.ok) setUnidadesFirestore(resultado.data)
+    })
+
+    // Perfil: reflete no ato as alterações feitas pelo administrador em outro
+    // dispositivo (antes, o cadastro era lido uma única vez no carregamento).
+    const desobservarCliente = observarClientePorUid(uid, (resultado) => {
+      if (resultado.ok) setClienteFirestore(resultado.data)
+    })
+
+    // Chamados não possuem consulta em tempo real dedicada — carga única.
+    let ativo = true
+    getChamadosDoCliente(uid)
+      .then((resultado) => {
+        if (ativo && resultado.ok) setChamadosFirestore(resultado.data)
+      })
+      .catch(() => {})
+
     return () => {
       ativo = false
+      desobservarFaturas()
+      desobservarUnidades()
+      desobservarCliente()
     }
   }, [uid])
 
+  // ===== FONTE DA VERDADE: banco central (Firestore) =====
+  // O cache local é usado APENAS quando a sessão não tem Firebase (login
+  // local) — nunca é apresentado como se fosse o dado compartilhado.
   const todosClientes = getClientes()
-  const cliente = todosClientes.find((c) => c.id === session?.clienteId) || {
+  const todasFaturas = getFaturas()
+  const todasUnidades = getUnidades()
+
+  const clientePadrao = {
     id: uid,
     nome: session?.nome || 'Cliente',
     email: session?.email || '',
@@ -92,12 +101,18 @@ export function ClienteDashboard() {
     cep: '',
     whatsapp: '',
   }
-  const todasFaturas = getFaturas()
-  const todasUnidades = getUnidades()
 
-  // Usa dados do Firestore se disponíveis, senão fallback para dados locais
-  const faturasBase = faturasFirestore.length > 0 ? faturasFirestore : todasFaturas
-  const unidadesBase = unidadesFirestore.length > 0 ? unidadesFirestore : todasUnidades
+  const cliente =
+    clienteFirestore ||
+    (uid
+      ? todosClientes.find(
+          (c) => String(c.uid || '') === String(uid) || String(c.id) === String(uid),
+        )
+      : todosClientes.find((c) => c.id === session?.clienteId)) ||
+    clientePadrao
+
+  const faturasBase = uid ? faturasFirestore : todasFaturas
+  const unidadesBase = uid ? unidadesFirestore : todasUnidades
 
   // Faturas apenas deste cliente e publicadas (status = disponivel)
   const faturas = faturasBase.filter(
@@ -144,27 +159,46 @@ export function ClienteDashboard() {
   ]
 
   const salvarCadastro = async () => {
-    const clientes = JSON.parse(localStorage.getItem('natureforce-clientes') || '[]')
     const dados = dadosCadastro || cliente
-    const updated = clientes.map((c) => (c.id === cliente.id ? { ...c, ...dados } : c))
-    localStorage.setItem('natureforce-clientes', JSON.stringify(updated))
+    setErroSalvamento('')
 
-    // Se autenticado via Firebase, salva também no Firestore
+    // ===== 1. Banco central (fonte da verdade) =====
     if (uid) {
-      try {
-        await atualizarCliente(uid, {
-          nome: dados.nome,
-          telefone: dados.telefone,
-          email: dados.email,
-          endereco: dados.endereco,
-          cidade: dados.cidade,
-          estado: dados.estado,
-          cep: dados.cep,
-          whatsapp: dados.whatsapp,
-        })
-      } catch {
-        // Fallback silencioso — dados locais já salvos
+      const campos = {
+        nome: dados.nome,
+        telefone: dados.telefone,
+        email: dados.email,
+        endereco: dados.endereco,
+        cidade: dados.cidade,
+        estado: dados.estado,
+        cep: dados.cep,
+        whatsapp: dados.whatsapp,
       }
+
+      const resultado = await atualizarCliente(uid, campos)
+      if (!resultado.ok) {
+        setErroSalvamento(
+          resultado.message ||
+            'Não foi possível salvar no banco central. Verifique sua conexão e tente novamente.',
+        )
+        setTimeout(() => setErroSalvamento(''), 8000)
+        return
+      }
+
+      // ===== 2. Espelha no cache local =====
+      // (o observador em tempo real também atualiza; aqui garantimos a
+      // consistência imediata da tela)
+      const clientes = getStore('clientes')
+      const atualizado = clientes.some((c) => String(c.id) === String(cliente.id))
+      if (atualizado) {
+        setStore(
+          'clientes',
+          clientes.map((c) =>
+            String(c.id) === String(cliente.id) ? { ...c, ...campos, uid } : c,
+          ),
+        )
+      }
+      setClienteFirestore((atual) => ({ ...(atual || cliente), ...campos }))
     }
 
     setSalvo(true)
@@ -174,19 +208,21 @@ export function ClienteDashboard() {
   const enviarTicket = async (e) => {
     e.preventDefault()
     if (!ticket.trim()) return
+    setErroTicket('')
 
-    // Se autenticado via Firebase, salva no Firestore
     if (uid) {
       const resultado = await criarChamado(uid, { assunto: ticket.trim() })
-      if (resultado.ok) {
-        setTicketEnviado(true)
-        setTicket('')
-        setTimeout(() => setTicketEnviado(false), 5000)
+      if (!resultado.ok) {
+        // SEM fallback silencioso: o cliente precisa saber que a solicitação
+        // NÃO chegou ao banco central.
+        setErroTicket(
+          resultado.message || 'Não foi possível enviar a solicitação. Tente novamente.',
+        )
+        setTimeout(() => setErroTicket(''), 8000)
         return
       }
     }
 
-    // Fallback local
     setTicketEnviado(true)
     setTicket('')
     setTimeout(() => setTicketEnviado(false), 5000)
@@ -361,9 +397,15 @@ export function ClienteDashboard() {
                             onClick={async () => {
                               try {
                                 const data = await obterArquivo(fat.id)
-                                if (data) window.open(data, '_blank')
+                                if (data) {
+                                  window.open(data, '_blank')
+                                } else {
+                                  alert(
+                                    'O PDF original não está disponível neste dispositivo. O arquivo é guardado no navegador do computador que importou a fatura (os dados da fatura em si estão no banco central). Solicite o PDF pelo atendimento.',
+                                  )
+                                }
                               } catch {
-                                alert('Arquivo não encontrado.')
+                                alert('Arquivo não encontrado neste dispositivo.')
                               }
                             }}
                           >
@@ -379,6 +421,10 @@ export function ClienteDashboard() {
                                   link.href = data
                                   link.download = fat.arquivo || 'fatura.pdf'
                                   link.click()
+                                } else {
+                                  alert(
+                                    'O PDF original não está disponível neste dispositivo: ele é guardado no navegador do computador que importou a fatura. Solicite o PDF pelo atendimento.',
+                                  )
                                 }
                               } catch {
                                 alert('Arquivo não encontrado.')
@@ -593,6 +639,12 @@ export function ClienteDashboard() {
             </button>
           </form>
 
+          {erroTicket && (
+            <p style={{ padding: '10px', background: '#fef2f2', color: '#b91c1c', borderRadius: '8px', marginBottom: '12px' }}>
+              ⚠ {erroTicket}
+            </p>
+          )}
+
           {ticketEnviado && (
             <p style={{ padding: '10px', background: '#f0fdf4', color: '#166534', borderRadius: '8px' }}>
               Solicitação enviada! Nossa equipe retornará em breve.
@@ -638,6 +690,12 @@ export function ClienteDashboard() {
               <h3>Meu Cadastro</h3>
             </div>
           </div>
+
+          {erroSalvamento && (
+            <p style={{ padding: '10px', background: '#fef2f2', color: '#b91c1c', borderRadius: '8px', marginBottom: '12px' }}>
+              ⚠ {erroSalvamento}
+            </p>
+          )}
 
           {salvo && (
             <p style={{ padding: '10px', background: '#f0fdf4', color: '#166534', borderRadius: '8px', marginBottom: '12px' }}>

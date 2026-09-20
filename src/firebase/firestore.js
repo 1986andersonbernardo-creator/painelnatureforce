@@ -12,11 +12,12 @@ import {
   setDoc,
   updateDoc,
   addDoc,
+  deleteDoc,
   onSnapshot,
 } from 'firebase/firestore'
 import { db } from './config'
 import { gerarIdFatura, montarChaveIdempotencia } from '../services/faturaDedup'
-
+import { idDocumento } from '../services/persistencia'
 // ==================== CLIENTES ====================
 
 // Busca o documento do cliente pelo UID (o UID é o ID do documento)
@@ -64,7 +65,7 @@ export const getFaturasDoCliente = async (uid) => {
     querySnapshot.forEach((docSnap) => {
       faturas.push({ id: docSnap.id, ...docSnap.data() })
     })
-    return { ok: true, data: faturas }
+    return { ok: true, data: dedupeFaturas(faturas) }
   } catch {
     return { ok: false, message: 'Erro ao buscar faturas.' }
   }
@@ -80,7 +81,7 @@ export const observarFaturasDoCliente = (uid, callback) => {
       snapshot.forEach((docSnap) => {
         faturas.push({ id: docSnap.id, ...docSnap.data() })
       })
-      callback({ ok: true, data: faturas })
+      callback({ ok: true, data: dedupeFaturas(faturas) })
     },
     () => {
       callback({ ok: false, message: 'Erro ao buscar faturas.' })
@@ -326,6 +327,82 @@ export const criarChamado = async (uid, dados) => {
   }
 }
 
+// ==================== SINCRONIZAÇÃO GENÉRICA (cache local ↔ Firestore) ====================
+// Usada pela camada de persistência (services/persistencia.js) para espelhar
+// toda alteração administrativa no Firestore — que é a fonte de verdade
+// compartilhada com a Área do Cliente e com outros navegadores/dispositivos.
+//
+// Requer sessão autenticada: as regras de segurança autorizam o próprio cliente
+// (uid) e o administrador (token admin OU e-mail na lista de administradores).
+
+// Lista todos os documentos de uma coleção
+export const listarDocumentos = async (colecao) => {
+  try {
+    const snapshot = await getDocs(collection(db, colecao))
+    const documentos = []
+    snapshot.forEach((docSnap) => {
+      documentos.push({ id: docSnap.id, ...docSnap.data() })
+    })
+    return { ok: true, data: documentos }
+  } catch (error) {
+    return {
+      ok: false,
+      data: [],
+      codigo: error?.code || 'firestore/erro',
+      message: 'Não foi possível ler os dados compartilhados.',
+    }
+  }
+}
+
+// Grava (cria ou atualiza) um documento. `merge` preserva campos não enviados.
+export const salvarDocumento = async (colecao, id, dados, { merge = true } = {}) => {
+  try {
+    await setDoc(doc(db, colecao, String(id)), dados, { merge })
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      codigo: error?.code || 'firestore/erro',
+      message: 'Não foi possível salvar no banco compartilhado.',
+    }
+  }
+}
+
+// Remove um documento
+export const removerDocumento = async (colecao, id) => {
+  try {
+    await deleteDoc(doc(db, colecao, String(id)))
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      codigo: error?.code || 'firestore/erro',
+      message: 'Não foi possível remover no banco compartilhado.',
+    }
+  }
+}
+
+// Grava uma coleção inteira (espelhamento do cache local para o Firestore).
+// O id de cada documento é resolvido por `idDocumento` (clientes usam o UID).
+export const sincronizarColecaoRemota = async (colecao, itens = []) => {
+  const resultados = await Promise.allSettled(
+    itens.map((item) => salvarDocumento(colecao, idDocumento(colecao, item), item)),
+  )
+
+  const falhas = []
+  resultados.forEach((resultado, indice) => {
+    const retorno = resultado.status === 'fulfilled' ? resultado.value : { ok: false }
+    if (!retorno?.ok) {
+      falhas.push({
+        id: idDocumento(colecao, itens[indice]),
+        codigo: retorno?.codigo || 'firestore/erro',
+      })
+    }
+  })
+
+  return { ok: falhas.length === 0, gravados: itens.length - falhas.length, falhas }
+}
+
 // ==================== UTILITÁRIOS ====================
 
 // Verifica se o Firestore está acessível (conexão)
@@ -337,3 +414,82 @@ export const verificarConexao = async () => {
     return false
   }
 }
+
+// ==================== SINCRONIZAÇÃO EM TEMPO REAL ====================
+// onSnapshot: quando o banco central muda (alteração feita em outro
+// dispositivo), o callback entrega a lista atualizada — a interface reflete a
+// alteração sem depender de recarregar a página.
+
+/**
+ * Remove faturas duplicadas do MESMO registro lógico.
+ * Antes da correção, a mesma fatura podia gravar dois documentos no Firestore
+ * (id determinístico + id local). A chave de idempotência identifica o
+ * registro canônico — o documento legado restante não deve aparecer na UI.
+ * @param {Array} faturas
+ * @returns {Array}
+ */
+export const dedupeFaturas = (faturas = []) => {
+  const vistos = new Set()
+  return faturas.filter((f) => {
+    const chave = f?.chaveIdempotencia
+      ? `idem:${f.chaveIdempotencia}`
+      : f?.hashArquivo
+        ? `hash:${f.hashArquivo}`
+        : `id:${f?.id ?? ''}`
+    if (vistos.has(chave)) return false
+    vistos.add(chave)
+    return true
+  })
+}
+
+/**
+ * Observa uma coleção inteira em tempo real.
+ * @param {string} colecao
+ * @param {(resultado:{ok:boolean, data?:Array, codigo?:string, message?:string}) => void} callback
+ * @returns {() => void} unsubscribe
+ */
+export const observarColecao = (colecao, callback) =>
+  onSnapshot(
+    collection(db, colecao),
+    (snapshot) => {
+      const documentos = []
+      snapshot.forEach((docSnap) => {
+        documentos.push({ id: docSnap.id, ...docSnap.data() })
+      })
+      callback({ ok: true, data: documentos })
+    },
+    (error) => {
+      callback({
+        ok: false,
+        data: [],
+        codigo: error?.code || 'firestore/erro',
+        message: 'Não foi possível acompanhar as alterações do banco compartilhado.',
+      })
+    },
+  )
+
+/**
+ * Observa o documento do cliente em tempo real (perfil atualiza em qualquer
+ * dispositivo quando o administrador altera o cadastro).
+ * @param {string} uid
+ * @param {(resultado:{ok:boolean, data?:Object|null, message?:string}) => void} callback
+ * @returns {() => void} unsubscribe
+ */
+export const observarClientePorUid = (uid, callback) =>
+  onSnapshot(
+    doc(db, 'clientes', uid),
+    (snapshot) => {
+      callback({
+        ok: true,
+        data: snapshot.exists() ? { id: snapshot.id, ...snapshot.data() } : null,
+      })
+    },
+    (error) => {
+      callback({
+        ok: false,
+        data: null,
+        codigo: error?.code || 'firestore/erro',
+        message: 'Não foi possível acompanhar os dados do cliente.',
+      })
+    },
+  )
