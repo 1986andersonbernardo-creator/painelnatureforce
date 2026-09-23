@@ -2,13 +2,15 @@ import { useState, useEffect } from 'react'
 import { useAuth } from '../../context/AuthContext'
 import { obterArquivo, getStore, setStore } from '../../store/db'
 import logo from '../../assets/logo.png'
+// Isolamento: SOMENTE as faturas deste cliente (id local, UID ou UCs dele).
+import { filtrarFaturasDoCliente } from '../../services/persistencia'
 import {
-  getChamadosDoCliente,
   criarChamado,
   atualizarCliente,
   observarFaturasDoCliente,
   observarUnidadesDoCliente,
   observarClientePorUid,
+  observarChamadosDoCliente,
 } from '../../firebase/firestore'
 
 const formatCurrency = (value) =>
@@ -36,50 +38,58 @@ export function ClienteDashboard() {
 
   const uid = session?.uid || session?.clienteId
 
+  // UID da sessão FIREBASE. Uma sessão local (fallback offline, login contra o
+  // cadastro do cache) NÃO tem uid: o Firestore negaria as leituras e a tela
+  // viraria "Erro ao buscar faturas" em vez de mostrar o cache local. Por isso
+  // os observadores só são iniciados quando há sessão no Firebase.
+  const uidFirebase = session?.uid || ''
+
   // ==================== Sincronização em tempo real ====================
   // onSnapshot: o que o administrador alterar (em qualquer dispositivo) chega
   // aqui automaticamente, sem recarregar a página. O Firestore é a FONTE DA
   // VERDADE; o cache local é fallback apenas para sessões sem Firebase.
   useEffect(() => {
-    if (!uid) {
+    // Sessão SEM Firebase: usa somente o cache local (fallback offline) e não
+    // tenta consultar o banco — antes a tentativa era negada pelas regras e a
+    // tela inteira ficava bloqueada em um erro de carregamento.
+    if (!uidFirebase) {
       setLoading(false)
+      setErroDados('')
       return undefined
     }
 
     setErroDados('')
     setLoading(true)
 
-    const desobservarFaturas = observarFaturasDoCliente(uid, (resultado) => {
+    const desobservarFaturas = observarFaturasDoCliente(uidFirebase, (resultado) => {
       if (resultado.ok) setFaturasFirestore(resultado.data)
       else setErroDados(resultado.message || 'Não foi possível carregar suas faturas.')
       setLoading(false)
     })
 
-    const desobservarUnidades = observarUnidadesDoCliente(uid, (resultado) => {
+    const desobservarUnidades = observarUnidadesDoCliente(uidFirebase, (resultado) => {
       if (resultado.ok) setUnidadesFirestore(resultado.data)
     })
 
     // Perfil: reflete no ato as alterações feitas pelo administrador em outro
     // dispositivo (antes, o cadastro era lido uma única vez no carregamento).
-    const desobservarCliente = observarClientePorUid(uid, (resultado) => {
+    const desobservarCliente = observarClientePorUid(uidFirebase, (resultado) => {
       if (resultado.ok) setClienteFirestore(resultado.data)
     })
 
-    // Chamados não possuem consulta em tempo real dedicada — carga única.
-    let ativo = true
-    getChamadosDoCliente(uid)
-      .then((resultado) => {
-        if (ativo && resultado.ok) setChamadosFirestore(resultado.data)
-      })
-      .catch(() => {})
+    // Chamados em tempo real: quando o administrador atualiza o status do
+    // pedido, o cliente vê a mudança sem recarregar a página.
+    const desobservarChamados = observarChamadosDoCliente(uidFirebase, (resultado) => {
+      if (resultado.ok) setChamadosFirestore(resultado.data)
+    })
 
     return () => {
-      ativo = false
       desobservarFaturas()
       desobservarUnidades()
       desobservarCliente()
+      desobservarChamados()
     }
-  }, [uid])
+  }, [uidFirebase])
 
   // ===== FONTE DA VERDADE: banco central (Firestore) =====
   // O cache local é usado APENAS quando a sessão não tem Firebase (login
@@ -111,14 +121,23 @@ export function ClienteDashboard() {
       : todosClientes.find((c) => c.id === session?.clienteId)) ||
     clientePadrao
 
-  const faturasBase = uid ? faturasFirestore : todasFaturas
-  const unidadesBase = uid ? unidadesFirestore : todasUnidades
+  const faturasBase = uidFirebase ? faturasFirestore : todasFaturas
+  const unidadesBase = uidFirebase ? unidadesFirestore : todasUnidades
 
-  // Faturas apenas deste cliente e publicadas (status = disponivel)
-  const faturas = faturasBase.filter(
-    (f) => f.clienteId === uid && f.status === 'disponivel',
+  // Unidades deste cliente: UID na sessão Firebase, id local na sessão offline
+  // (clienteIdLocal cobre o vínculo anterior à ponte de identidade).
+  const unidades = unidadesBase.filter(
+    (u) => String(u.clienteId) === String(uid) || String(u.clienteIdLocal) === String(uid),
   )
-  const unidades = unidadesBase.filter((u) => u.clienteId === uid)
+
+  // Faturas apenas deste cliente (isolamento por id local, UID ou UCs dele) e
+  // já PUBLICADAS pelo administrador (status = 'disponivel').
+  const faturas = filtrarFaturasDoCliente({
+    faturas: faturasBase,
+    clienteId: uid,
+    uids: uidFirebase ? [uidFirebase] : [],
+    ucs: unidades.map((u) => u.numeroUC),
+  }).filter((f) => f.status === 'disponivel')
 
   // Métricas do cliente
   const consumoAtual = faturas[0]?.consumo || 0
@@ -148,6 +167,11 @@ export function ClienteDashboard() {
       valor: f.consumo || 0,
     }))
 
+  // Escala do gráfico: relativa ao MAIOR consumo do período. Uma escala fixa
+  // (500 kWh) deixava barras invisíveis com consumos baixos e "saturadas" nos
+  // altos, sem relação com os dados reais.
+  const maiorConsumo = Math.max(1, ...consumoMensal.map((item) => item.valor))
+
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'faturas', label: 'Faturas' },
@@ -162,20 +186,21 @@ export function ClienteDashboard() {
     const dados = dadosCadastro || cliente
     setErroSalvamento('')
 
-    // ===== 1. Banco central (fonte da verdade) =====
-    if (uid) {
-      const campos = {
-        nome: dados.nome,
-        telefone: dados.telefone,
-        email: dados.email,
-        endereco: dados.endereco,
-        cidade: dados.cidade,
-        estado: dados.estado,
-        cep: dados.cep,
-        whatsapp: dados.whatsapp,
-      }
+    const campos = {
+      nome: dados.nome,
+      telefone: dados.telefone,
+      email: dados.email,
+      endereco: dados.endereco,
+      cidade: dados.cidade,
+      estado: dados.estado,
+      cep: dados.cep,
+      whatsapp: dados.whatsapp,
+    }
 
-      const resultado = await atualizarCliente(uid, campos)
+    // ===== 1. Banco central (fonte da verdade) — apenas com sessão Firebase =====
+    // Numa sessão local o Firestore negaria a escrita (não há autenticação).
+    if (uidFirebase) {
+      const resultado = await atualizarCliente(uidFirebase, campos)
       if (!resultado.ok) {
         setErroSalvamento(
           resultado.message ||
@@ -184,21 +209,16 @@ export function ClienteDashboard() {
         setTimeout(() => setErroSalvamento(''), 8000)
         return
       }
-
-      // ===== 2. Espelha no cache local =====
-      // (o observador em tempo real também atualiza; aqui garantimos a
-      // consistência imediata da tela)
-      const clientes = getStore('clientes')
-      const atualizado = clientes.some((c) => String(c.id) === String(cliente.id))
-      if (atualizado) {
-        setStore(
-          'clientes',
-          clientes.map((c) =>
-            String(c.id) === String(cliente.id) ? { ...c, ...campos, uid } : c,
-          ),
-        )
-      }
       setClienteFirestore((atual) => ({ ...(atual || cliente), ...campos }))
+    }
+
+    // ===== 2. Espelha no cache local (sobrevive a reload e cobre a sessão offline) =====
+    const clientes = getStore('clientes')
+    if (clientes.some((c) => String(c.id) === String(cliente.id))) {
+      setStore(
+        'clientes',
+        clientes.map((c) => (String(c.id) === String(cliente.id) ? { ...c, ...campos } : c)),
+      )
     }
 
     setSalvo(true)
@@ -210,17 +230,31 @@ export function ClienteDashboard() {
     if (!ticket.trim()) return
     setErroTicket('')
 
-    if (uid) {
-      const resultado = await criarChamado(uid, { assunto: ticket.trim() })
-      if (!resultado.ok) {
-        // SEM fallback silencioso: o cliente precisa saber que a solicitação
-        // NÃO chegou ao banco central.
-        setErroTicket(
-          resultado.message || 'Não foi possível enviar a solicitação. Tente novamente.',
-        )
-        setTimeout(() => setErroTicket(''), 8000)
-        return
-      }
+    // Sessão local (sem Firebase): a escrita seria negada pelas regras —
+    // avisamos em vez de mostrar um erro genérico depois do envio.
+    if (!uidFirebase) {
+      setErroTicket(
+        'O envio de solicitações exige conexão com o banco central. Entre novamente com acesso à internet.',
+      )
+      setTimeout(() => setErroTicket(''), 8000)
+      return
+    }
+
+    // O nome/e-mail vão junto: sem eles o administrador não identificava de
+    // quem era a solicitação (só um identificador técnico).
+    const resultado = await criarChamado(uidFirebase, {
+      assunto: ticket.trim(),
+      clienteNome: cliente.nome || session?.nome || '',
+      clienteEmail: cliente.email || session?.email || '',
+    })
+    if (!resultado.ok) {
+      // SEM fallback silencioso: o cliente precisa saber que a solicitação
+      // NÃO chegou ao banco central.
+      setErroTicket(
+        resultado.message || 'Não foi possível enviar a solicitação. Tente novamente.',
+      )
+      setTimeout(() => setErroTicket(''), 8000)
+      return
     }
 
     setTicketEnviado(true)
@@ -311,7 +345,7 @@ export function ClienteDashboard() {
                   <div key={item.mes} className="bar-group">
                     <span className="bar-value">{item.valor} kWh</span>
                     <div className="bar-track">
-                      <span style={{ height: `${Math.min((item.valor / 500) * 100, 100)}%` }} />
+                      <span style={{ height: `${Math.min((item.valor / maiorConsumo) * 100, 100)}%` }} />
                     </div>
                     <strong>{item.mes}</strong>
                   </div>
@@ -494,7 +528,10 @@ export function ClienteDashboard() {
 
     /* ==================== CONSUMO ==================== */
     if (activeMenu === 'consumo') {
-      const energiaCompensada = Math.round((consumoTotal || 0) * 0.62)
+      // Indicadores derivados APENAS de dados reais das faturas. Os números
+      // antigos (consumo × 0,62) não tinham base no sistema e apresentavam ao
+      // cliente uma grandeza inexistente.
+      const mediaPorFatura = faturas.length > 0 ? Math.round(consumoTotal / faturas.length) : 0
       const comparativo = consumoMensal.length >= 2
         ? ((consumoMensal[consumoMensal.length - 1].valor - consumoMensal[consumoMensal.length - 2].valor) /
             consumoMensal[consumoMensal.length - 2].valor) * 100
@@ -511,8 +548,8 @@ export function ClienteDashboard() {
 
           <div className="summary-grid">
             <div className="summary-card">
-              <span>Energia compensada</span>
-              <strong>{energiaCompensada} kWh</strong>
+              <span>Média por fatura</span>
+              <strong>{mediaPorFatura} kWh</strong>
             </div>
             <div className="summary-card">
               <span>Consumo total</span>
@@ -531,7 +568,12 @@ export function ClienteDashboard() {
 
     /* ==================== ECONOMIA ==================== */
     if (activeMenu === 'economia') {
-      const percentual = consumoTotal > 0 ? Math.round((economiaTotal / (consumoTotal * 0.45)) * 100) : 0
+      // Percentual REAL: economia acumulada sobre o total elegível faturado
+      // (energia + TUSD + TE, o que de fato recebe 20%). O divisor antigo
+      // (consumo × 0,45) era uma constante inventada e o número exibido não
+      // correspondia a nenhum valor do sistema.
+      const totalElegivel = faturas.reduce((acc, f) => acc + (f.calculo?.valorElegivel || 0), 0)
+      const percentual = totalElegivel > 0 ? Math.round((economiaTotal / totalElegivel) * 100) : 0
 
       return (
         <section className="panel">
@@ -565,7 +607,11 @@ export function ClienteDashboard() {
     /* ==================== FINANCEIRO ==================== */
     if (activeMenu === 'financeiro') {
       const ultimaFatura = faturas[0]
-      const totalPago = faturas
+      // Não existe integração de pagamentos no sistema: os números abaixo são
+      // VALORES FATURADOS (derivados do vencimento), não confirmações de
+      // pagamento. Os rótulos dizem exatamente isso — antes aparecia "Total
+      // pago", o que sugeria um histórico de recebimentos inexistente.
+      const totalVencido = faturas
         .filter((f) => {
           if (!f.vencimento) return false
           return new Date(f.vencimento) < new Date()
@@ -583,7 +629,7 @@ export function ClienteDashboard() {
 
           <div className="info-grid finance-grid">
             <article className="info-card">
-              <span>Mensalidade</span>
+              <span>Última fatura</span>
               <strong>{formatCurrency(ultimaFatura?.valorTotal || 0)}</strong>
             </article>
             <article className="info-card">
@@ -595,8 +641,8 @@ export function ClienteDashboard() {
               <strong>{faturaEmAberto ? 'Em aberto' : 'Em dia'}</strong>
             </article>
             <article className="info-card">
-              <span>Total pago</span>
-              <strong>{formatCurrency(totalPago)}</strong>
+              <span>Faturas vencidas (soma)</span>
+              <strong>{formatCurrency(totalVencido)}</strong>
             </article>
           </div>
         </section>
@@ -605,7 +651,7 @@ export function ClienteDashboard() {
 
     /* ==================== ATENDIMENTO ==================== */
     if (activeMenu === 'atendimento') {
-      const chamados = chamadosFirestore.length > 0 ? chamadosFirestore : []
+      const chamados = chamadosFirestore
 
       return (
         <section className="panel">
@@ -614,14 +660,18 @@ export function ClienteDashboard() {
               <span className="eyebrow">Suporte</span>
               <h3>Atendimento</h3>
             </div>
-            <a
-              className="whatsapp-button"
-              href={`https://wa.me/${cliente.whatsapp?.replace(/\D/g, '') || '5581999999999'}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              WhatsApp
-            </a>
+            {/* Só oferece o atalho se o cliente tiver WhatsApp cadastrado:
+                antes um número fictício era usado como padrão. */}
+            {cliente.whatsapp?.replace(/\D/g, '') && (
+              <a
+                className="whatsapp-button"
+                href={`https://wa.me/${cliente.whatsapp.replace(/\D/g, '')}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                WhatsApp
+              </a>
+            )}
           </div>
 
           <form onSubmit={enviarTicket} style={{ marginBottom: '20px' }}>
@@ -741,8 +791,12 @@ export function ClienteDashboard() {
               <input type="text" value={dados.whatsapp || ''} onChange={(e) => setDadosCadastro((d) => ({ ...(d || cliente), whatsapp: e.target.value }))} />
             </label>
             <label className="field">
-              <span>E-mail de acesso (login)</span>
-              <input type="email" value={dados.emailAcesso || ''} onChange={(e) => setDadosCadastro((d) => ({ ...(d || cliente), emailAcesso: e.target.value }))} />
+              <span>E-mail de acesso (login) — definido pelo administrador</span>
+              {/* Somente leitura: o e-mail de acesso é a credencial de entrada no
+                  Firebase Authentication. Alterá-lo aqui não muda a conta real e
+                  daria a sensação de sucesso sem efeito (campo era editável, mas
+                  nunca era salvo). */}
+              <input type="email" value={dados.emailAcesso || ''} disabled readOnly />
             </label>
           </div>
 

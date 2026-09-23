@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { recuperarSenha } from '../firebase/auth'
 import logo from '../assets/logo.png'
@@ -41,8 +41,10 @@ export function LoginCliente() {
   const { loginCliente } = useAuth()
   const navigate = useNavigate()
   const [form, setForm] = useState({
-    identifier: 'marina@natureforce.com',
-    password: '123456',
+    // Sem credenciais pré-preenchidas: o login de produção não deve virar a
+    // própria credencial na tela (sobretudo no administrativo).
+    identifier: '',
+    password: '',
   })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -153,7 +155,7 @@ export function LoginAdmin() {
   const navigate = useNavigate()
   const [form, setForm] = useState({
     email: 'admin@natureforce.com',
-    password: 'admin123',
+    password: '',
   })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -238,20 +240,11 @@ export function ProtectedRoute({ children, tipo }) {
     )
   }
 
+  // Sem sessão → volta para a tela de login correspondente. Antes ficava um
+  // painel "Acesso restrito" na própria rota protegida (inclusive depois do
+  // logout), e o usuário precisava escolher o link à mão.
   if (!session) {
-    return (
-      <div className="login-card-wrap" style={{ margin: '40px auto' }}>
-        <div className="login-card" style={{ minWidth: '320px' }}>
-          <h2>Acesso restrito</h2>
-          <p style={{ color: '#64748b', margin: '12px 0' }}>
-            Você precisa estar logado para acessar esta página.
-          </p>
-          <Link to={tipo === 'admin' ? '/admin/login' : '/login'} className="primary-button large-btn" style={{ textAlign: 'center', textDecoration: 'none' }}>
-            Fazer login
-          </Link>
-        </div>
-      </div>
-    )
+    return <Navigate to={tipo === 'admin' ? '/admin/login' : '/login'} replace />
   }
 
   if (tipo && session.tipo !== tipo) {

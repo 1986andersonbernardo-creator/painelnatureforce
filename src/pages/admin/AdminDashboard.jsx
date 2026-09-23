@@ -8,6 +8,10 @@ import { identificarFatura, DECISAO } from '../../services/faturaIdentificacao'
 import { STATUS_FATURA, MOTIVO_REVISAO, ROTULO_MOTIVO_REVISAO } from '../../services/faturaStatus'
 // Validação por CONTEÚDO (assinatura "%PDF-") — não por MIME.
 import { validarArquivoPDF } from '../../services/pdfValidacao'
+// Regra única de vínculo cliente ↔ registro (id local OU UID do Firebase).
+import { registroPertenceAoCliente } from '../../services/persistencia'
+// Atendimento: as solicitações enviadas pelos clientes precisam chegar à equipe.
+import { observarTodosChamados, atualizarChamado } from '../../firebase/firestore'
 
 const formatCurrency = (value) =>
   new Intl.NumberFormat('pt-BR', {
@@ -46,7 +50,7 @@ const TAMANHO_MAX_PDF_MB = 20
 const TAMANHO_MAX_PDF_BYTES = TAMANHO_MAX_PDF_MB * 1024 * 1024
 
 export function AdminDashboard() {
-  const { session, logout, getClientes, getFaturas, getUnidades, getUsuarios, getLogs, getPreCadastros, estadoSync, recarregarDadosCompartilhados, dadosVersao } = useAuth()
+  const { session, logout, getClientes, getFaturas, getUnidades, getUsuarios, getPreCadastros, estadoSync, recarregarDadosCompartilhados } = useAuth()
   const [activeMenu, setActiveMenu] = useState('dashboard')
   const [busca, setBusca] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
@@ -72,14 +76,20 @@ export function AdminDashboard() {
     .filter((f) => f.status === 'disponivel' && f.calculo)
     .reduce((acc, f) => acc + (f.calculo.valorDesconto || 0), 0)
 
-  // Clientes sem fatura no mês atual
+  // Clientes sem fatura no mês atual.
+  // A comparação usa `registroPertenceAoCliente` (id local OU UID do Firebase):
+  // depois que o cliente entra pela primeira vez, o vínculo dos registros passa
+  // a ser o UID — comparar apenas por `id` acusava erroneamente "sem fatura".
   const mesAtual = new Date().toISOString().slice(0, 7)
-  const clientesComFaturaMes = new Set(
-    faturas
-      .filter((f) => f.referencia === mesAtual && f.status !== 'aguardando revisão')
-      .map((f) => f.clienteId),
+  const faturasDoMes = faturas.filter(
+    (f) =>
+      f.referencia === mesAtual &&
+      f.status !== 'erro' &&
+      f.statusProcessamento !== STATUS_FATURA.DUPLICADA,
   )
-  const clientesSemFatura = clientes.filter((c) => !clientesComFaturaMes.has(c.id))
+  const clientesSemFatura = clientes.filter(
+    (c) => !faturasDoMes.some((f) => registroPertenceAoCliente({ registro: f, cliente: c })),
+  )
 
   // ==================== Busca global ====================
   const termoBusca = busca.trim().toLowerCase()
@@ -107,6 +117,7 @@ export function AdminDashboard() {
     { id: 'faturas', label: 'Faturas' },
     { id: 'precadastros', label: `Pré-cadastros${preCadastrosPendentes > 0 ? ` (${preCadastrosPendentes})` : ''}` },
     { id: 'revisoes', label: 'Revisões' },
+    { id: 'atendimento', label: 'Atendimento' },
     { id: 'usuarios', label: 'Usuários' },
     { id: 'logs', label: 'Logs' },
     { id: 'relatorios', label: 'Relatórios' },
@@ -303,6 +314,11 @@ export function AdminDashboard() {
       return <RevisoesSection />
     }
 
+    /* ============================ ATENDIMENTO ============================ */
+    if (activeMenu === 'atendimento') {
+      return <AtendimentoSection />
+    }
+
     /* ============================ USUÁRIOS ============================ */
     if (activeMenu === 'usuarios') {
       return <UsuariosSection />
@@ -467,6 +483,8 @@ function ClientesSection() {
     addUnidade,
     updateUnidade,
     removeUnidade,
+    // Cria a conta de acesso do cliente no Firebase Authentication
+    provisionarAcessoCliente,
   } = useAuth()
   const [clientes, setClientes] = useDadosSincronizados(getClientes, getClientes())
   const [showForm, setShowForm] = useState(false)
@@ -515,68 +533,95 @@ function ClientesSection() {
 
   const refresh = () => setClientes(getClientes())
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
     const result = editandoId
       ? updateCliente(editandoId, form)
       : addCliente(form)
 
-    if (result.ok) {
-      // Persiste as UCs associadas ao cliente
-      const clienteId = editandoId || result.cliente?.id
-      let erroUc = ''
-      if (clienteId) {
-        formUcs.forEach((uc) => {
-          const payload = { ...uc, clienteId }
-          // Remove flags internas de origem antes de salvar
-          delete payload._origId
-          delete payload._novo
-          delete payload._tempId
-          const res = uc._origId ? updateUnidade(uc._origId, payload) : addUnidade(payload)
-          if (!res.ok) erroUc = erroUc || res.message
-        })
-        // Remove UCs que existiam e foram excluídas no form
-        origUcs.forEach((uc) => {
-          const aindaExiste = formUcs.some((f) => f._origId === uc.id)
-          if (!aindaExiste) removeUnidade(uc.id)
-        })
-      }
-      setMensagem(
-        (editandoId ? 'Cliente atualizado com sucesso!' : 'Cliente cadastrado com sucesso!') +
-          (erroUc ? ` (UC: ${erroUc})` : ''),
-      )
-      setShowForm(false)
-      setEditandoId(null)
-      setFormUcs([])
-      setOrigUcs([])
-      setUcEditando(null)
-      setShowUcForm(false)
-      setUcMsg('')
-      setForm({
-        nome: '',
-        cpfCnpj: '',
-        telefone: '',
-        email: '',
-        endereco: '',
-        cidade: '',
-        estado: '',
-        cep: '',
-        whatsapp: '',
-        emailAcesso: '',
-        senhaAcesso: '',
-      })
-      refresh()
-      setTimeout(() => setMensagem(''), 3000)
-    } else {
+    if (!result.ok) {
       setMensagem(result.message)
       setTimeout(() => setMensagem(''), 3000)
+      return
     }
+
+    // Persiste as UCs associadas ao cliente.
+    //
+    // O `clienteId` gravado nas UCs é SEMPRE o identificador canônico (UID do
+    // Firebase quando existe) — é por ele que a Área do Cliente filtra. Antes,
+    // salvar o cadastro de um cliente já vinculado devolvia as UCs para o id
+    // local e o cliente deixava de enxergar as próprias unidades/faturas.
+    const clienteSalvo = result.cliente || null
+    const clienteId = clienteSalvo?.uid || clienteSalvo?.id
+    let erroUc = ''
+    let avisoAcesso = ''
+
+    if (clienteId) {
+      for (const uc of formUcs) {
+        const payload = { ...uc, clienteId }
+        // Remove flags internas de origem antes de salvar
+        delete payload._origId
+        delete payload._novo
+        delete payload._tempId
+        const res = uc._origId ? updateUnidade(uc._origId, payload) : addUnidade(payload)
+        if (!res.ok) erroUc = erroUc || res.message
+      }
+      // Remove as UCs que existiam e foram excluídas no formulário
+      for (const uc of origUcs) {
+        const aindaExiste = formUcs.some((f) => f._origId === uc.id)
+        if (!aindaExiste) {
+          const res = await removeUnidade(uc.id)
+          if (!res.ok) avisoAcesso = avisoAcesso || res.message
+        }
+      }
+    }
+
+    // Cria a conta de acesso do cliente no Firebase Authentication.
+    // Sem essa conta o cliente NÃO consegue entrar no próprio celular: o login
+    // local depende do cadastro estar no cache do navegador que está entrando.
+    // Só é tentada no cadastro de um cliente NOVO; para clientes antigos existe
+    // o botão "Criar acesso" no cartão do cliente.
+    if (!editandoId && clienteSalvo?.emailAcesso?.trim() && clienteSalvo?.senhaAcesso?.trim()) {
+      const acesso = await provisionarAcessoCliente(clienteSalvo.id)
+      if (!acesso.ok && !acesso.jaExistia) {
+        avisoAcesso = avisoAcesso ? `${avisoAcesso} ${acesso.message}` : acesso.message
+      }
+    }
+
+    setMensagem(
+      (editandoId ? 'Cliente atualizado com sucesso!' : 'Cliente cadastrado com sucesso!') +
+        (erroUc ? ` (UC: ${erroUc})` : '') +
+        (avisoAcesso ? ` ${avisoAcesso}` : ''),
+    )
+    setShowForm(false)
+    setEditandoId(null)
+    setFormUcs([])
+    setOrigUcs([])
+    setUcEditando(null)
+    setShowUcForm(false)
+    setUcMsg('')
+    setForm({
+      nome: '',
+      cpfCnpj: '',
+      telefone: '',
+      email: '',
+      endereco: '',
+      cidade: '',
+      estado: '',
+      cep: '',
+      whatsapp: '',
+      emailAcesso: '',
+      senhaAcesso: '',
+    })
+    refresh()
+    setTimeout(() => setMensagem(''), 8000)
   }
 
   const handleEdit = (cliente) => {
     setEditandoId(cliente.id)
     const clienteUcs = getUnidades()
-      .filter((u) => String(u.clienteId) === String(cliente.id))
+      // Mesma regra de vínculo usada em todo o sistema (id local OU UID).
+      .filter((u) => registroPertenceAoCliente({ registro: u, cliente }))
       .map((u) => ({ ...u, _origId: u.id }))
     setFormUcs(clienteUcs)
     setOrigUcs(clienteUcs.map((u) => ({ ...u })))
@@ -735,7 +780,7 @@ function ClientesSection() {
             </div>
             <div className="field">
               <span>Senha de acesso *</span>
-              <input type="text" required value={form.senhaAcesso} placeholder="senha do cliente" onChange={(e) => setForm((f) => ({ ...f, senhaAcesso: e.target.value }))} />
+              <input type="password" required value={form.senhaAcesso} placeholder="senha do cliente" onChange={(e) => setForm((f) => ({ ...f, senhaAcesso: e.target.value }))} />
             </div>
           </div>
           {/* ==================== UNIDADES CONSUMIDORAS ==================== */}
@@ -880,8 +925,16 @@ function ClientesSection() {
 
       <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
         {clientes.map((cliente) => {
-          const clienteFaturas = faturas.filter((f) => f.clienteId === cliente.id)
-          const clienteUnidades = unidades.filter((u) => u.clienteId === cliente.id)
+          // Vínculo pelo id local OU pelo UID (o cliente que já entrou no portal
+          // tem os registros apontando para o UID — comparar só por `id` mostraria
+          // "0 UC(s) · 0 fatura(s)").
+          const clienteFaturas = faturas.filter((f) =>
+            registroPertenceAoCliente({ registro: f, cliente }),
+          )
+          const clienteUnidades = unidades.filter((u) =>
+            registroPertenceAoCliente({ registro: u, cliente }),
+          )
+          const temAcesso = Boolean(cliente.uid || cliente.contaFirebase)
           return (
             <div key={cliente.id} className="invoice-item" style={{ marginBottom: '12px', padding: '12px', background: '#f8fafc', borderRadius: '12px' }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px 24px' }}>
@@ -893,19 +946,53 @@ function ClientesSection() {
                     <span className="tag tag-error">Inativo</span>
                   )}
                   {cliente.source === 'PDF_IMPORT' && <span className="tag tag-neutral">Via PDF</span>}
+                  {temAcesso ? (
+                    <span className="tag tag-success">Acesso criado</span>
+                  ) : (
+                    <span className="tag tag-warning">Sem acesso ao portal</span>
+                  )}
                   <small style={{ display: 'block', color: '#64748b' }}>
                     CPF: {cliente.cpfCnpj} · Tel: {cliente.telefone || '—'} · E-mail: {cliente.email || '—'}
                   </small>
                   <small style={{ display: 'block', color: '#64748b' }}>
                     Acesso: {cliente.emailAcesso || '—'} · {clienteUnidades.length} UC(s) · {clienteFaturas.length} fatura(s)
                   </small>
+                  {!temAcesso && cliente.emailAcesso && (
+                    <small style={{ display: 'block', color: '#b45309' }}>
+                      ⚠ O cliente ainda não consegue entrar no portal: a conta de acesso não foi criada.
+                    </small>
+                  )}
                 </div>
                 <div className="invoice-actions" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                   <button type="button" onClick={() => handleEdit(cliente)}>Editar</button>
+                  {!temAcesso && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const resultado = await provisionarAcessoCliente(cliente.id)
+                        setMensagem(resultado.message)
+                        refresh()
+                        setTimeout(() => setMensagem(''), 8000)
+                      }}
+                    >
+                      Criar acesso
+                    </button>
+                  )}
                   <button type="button" onClick={() => { toggleClienteAtivo(cliente.id); refresh(); }}>
                     {cliente.ativo ? 'Desativar' : 'Ativar'}
                   </button>
-                  <button type="button" onClick={() => { if (window.confirm(`Remover cliente ${cliente.nome}?`)) { removeCliente(cliente.id); refresh(); } }}>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!window.confirm(`Remover cliente ${cliente.nome}?`)) return
+                      const resultado = await removeCliente(cliente.id)
+                      if (resultado?.message) {
+                        setMensagem(resultado.message)
+                        setTimeout(() => setMensagem(''), 10000)
+                      }
+                      refresh()
+                    }}
+                  >
                     Remover
                   </button>
                 </div>
@@ -1224,7 +1311,13 @@ function FaturasSection() {
           referencia: normalizarRef(componentes.referencia) || null,
           vencimento: normalizarVenc(componentes.vencimento) || '',
           consumo: componentes.consumo || null,
-          status: resultado.status || 'erro',
+          // A fatura identificada NÃO vai direto para o cliente: fica AGUARDANDO
+          // PUBLICAÇÃO. O cliente só vê o que o administrador publicar
+          // (status 'disponivel') — é o fluxo indicado pelo painel "Pendentes" e
+          // pelo botão "Publicar p/ cliente". Antes o pipeline gravava
+          // 'disponivel' e a revisão humana era ignorada na prática.
+          status:
+            resultado.status === 'disponivel' ? 'aguardando revisão' : resultado.status || 'erro',
           componentes,
           calculo,
           validacao,
@@ -1417,6 +1510,22 @@ function FaturasSection() {
     refresh()
   }
 
+  /**
+   * Remove a fatura e informa quando o banco recusa a exclusão — antes a ordem
+   * era "remove local → recarrega" e uma falha remota reaparecia sem explicação.
+   */
+  const removerFaturaComAviso = async (id) => {
+    const resultado = await removeFatura(id)
+    if (resultado?.message) {
+      setMensagemErro(resultado.message)
+      setTimeout(() => setMensagemErro(''), 10000)
+    } else {
+      setMensagem('Fatura removida.')
+      setTimeout(() => setMensagem(''), 3000)
+    }
+    refresh()
+  }
+
   const faturasPendentes = faturas.filter((f) => f.status === 'aguardando revisão')
   const faturasPublicadas = faturas.filter((f) => f.status === 'disponivel')
   const faturasRequerRevisao = faturas.filter((f) => f.status === 'requer revisão')
@@ -1566,74 +1675,30 @@ function FaturasSection() {
               </div>
               <div className="invoice-actions">
                 <button type="button" onClick={() => publicarFatura(fat.id)}>Publicar p/ cliente</button>
-                <button type="button" onClick={() => { removeFatura(fat.id); refresh(); }}>Remover</button>
+                <button type="button" onClick={() => removerFaturaComAviso(fat.id)}>Remover</button>
               </div>
             </div>
           ))
         )}
       </section>
 
-      <section className="panel">
-        <div className="panel-header compact">
-          <div>
-            <span className="eyebrow">Requerem revisão</span>
-            <h3>Requer revisão ({faturasRequerRevisao.length})</h3>
+      {/* As listas de "Requer revisão" e "Com erro" existem na seção REVISÕES,
+          com os motivos detalhados e as ações de aprovar/rejeitar. Aqui fica
+          apenas o atalho — antes as mesmas faturas apareciam em dois lugares. */}
+      {(faturasRequerRevisao.length > 0 || faturasComErro.length > 0) && (
+        <section className="panel">
+          <div className="panel-header compact">
+            <div>
+              <span className="eyebrow">Análise administrativa</span>
+              <h3>Faturas que precisam de atenção</h3>
+            </div>
           </div>
-        </div>
-
-        {faturasRequerRevisao.length === 0 ? (
-          <p style={{ color: '#64748b', padding: '12px 0' }}>Nenhuma fatura requerendo revisão.</p>
-        ) : (
-          faturasRequerRevisao.map((fat) => (
-            <div key={fat.id} className="invoice-item" style={{ marginBottom: '10px', padding: '8px', background: '#fef2f2', borderRadius: '8px' }}>
-              <div>
-                <strong>{fat.arquivo}</strong>
-                <small>Cliente: {fat.clienteNome || '—'} · UC: {fat.uc || '—'}</small>
-                <small>Ref: {fat.referencia || '—'} · {fat.dataUpload}</small>
-                {fat.validacao?.erros?.length > 0 && (
-                  <small style={{ display: 'block', color: '#dc2626' }}>
-                    ⚠️ {fat.validacao.erros.join('; ')}
-                  </small>
-                )}
-              </div>
-              <div className="invoice-actions">
-                <button type="button" onClick={() => { removeFatura(fat.id); refresh(); }}>Remover</button>
-              </div>
-            </div>
-          ))
-        )}
-      </section>
-
-      <section className="panel">
-        <div className="panel-header compact">
-          <div>
-            <span className="eyebrow">Com erro</span>
-            <h3>Erros ({faturasComErro.length})</h3>
-          </div>
-        </div>
-
-        {faturasComErro.length === 0 ? (
-          <p style={{ color: '#64748b', padding: '12px 0' }}>Nenhuma fatura com erro.</p>
-        ) : (
-          faturasComErro.map((fat) => (
-            <div key={fat.id} className="invoice-item" style={{ marginBottom: '10px', padding: '8px', background: '#fef2f2', borderRadius: '8px' }}>
-              <div>
-                <strong>{fat.arquivo}</strong>
-                <small>Cliente: {fat.clienteNome || '—'} · UC: {fat.uc || '—'}</small>
-                <small>Ref: {fat.referencia || '—'} · {fat.dataUpload}</small>
-                {fat.validacao?.erros?.length > 0 && (
-                  <small style={{ display: 'block', color: '#dc2626' }}>
-                    ❌ {fat.validacao.erros.join('; ')}
-                  </small>
-                )}
-              </div>
-              <div className="invoice-actions">
-                <button type="button" onClick={() => { removeFatura(fat.id); refresh(); }}>Remover</button>
-              </div>
-            </div>
-          ))
-        )}
-      </section>
+          <p style={{ color: '#64748b', padding: '8px 0' }}>
+            {faturasRequerRevisao.length} fatura(s) requerem revisão e {faturasComErro.length} com erro —
+            veja os motivos e aprove ou rejeite na aba <strong>Revisões</strong>.
+          </p>
+        </section>
+      )}
 
       <section className="panel">
         <div className="panel-header compact">
@@ -1659,13 +1724,131 @@ function FaturasSection() {
                 )}
               </div>
               <div className="invoice-actions">
-                <button type="button" onClick={() => { removeFatura(fat.id); refresh(); }}>Remover</button>
+                <button type="button" onClick={() => removerFaturaComAviso(fat.id)}>Remover</button>
               </div>
             </div>
           ))
         )}
       </section>
     </>
+  )
+}
+
+/* ======================== SEÇÃO ATENDIMENTO ======================== */
+// As solicitações enviadas pelos clientes ficavam gravadas no banco e não
+// apareciam em NENHUMA tela: o cliente achava que seria atendido e ninguém
+// via o pedido. Esta seção fecha o fluxo (listar + mudar o status), e o cliente
+// acompanha a atualização em tempo real na aba Atendimento.
+function AtendimentoSection() {
+  const { session, logar, getClientes } = useAuth()
+  const [clientes] = useDadosSincronizados(getClientes, getClientes())
+  const [chamados, setChamados] = useState([])
+  const [carregando, setCarregando] = useState(true)
+  const [erro, setErro] = useState('')
+  const [mensagem, setMensagem] = useState('')
+
+  useEffect(() => {
+    const desobservar = observarTodosChamados((resultado) => {
+      setCarregando(false)
+      if (!resultado.ok) {
+        setErro(resultado.message || 'Não foi possível carregar as solicitações.')
+        return
+      }
+      setErro('')
+      setChamados(resultado.data)
+    })
+    return () => desobservar()
+  }, [])
+
+  // Nome do cliente: usa o que ficou gravado no chamado e, se faltar, resolve
+  // pelo vínculo (id local OU UID) no cadastro.
+  const nomeDoChamado = (chamado) => {
+    if (chamado.clienteNome) return chamado.clienteNome
+    const cliente = clientes.find((c) =>
+      registroPertenceAoCliente({ registro: { clienteId: chamado.clienteId }, cliente: c }),
+    )
+    return cliente?.nome || 'Cliente'
+  }
+
+  const mudarStatus = async (chamado, status) => {
+    const resultado = await atualizarChamado(chamado.id, { status })
+    if (!resultado.ok) {
+      setMensagem(resultado.message || 'Não foi possível atualizar a solicitação.')
+    } else {
+      setMensagem(`Solicitação de ${nomeDoChamado(chamado)} marcada como "${status}".`)
+      logar('ATENDIMENTO_ATUALIZADO', `Chamado ${chamado.id} → ${status}`, session?.nome || 'Sistema')
+    }
+    setTimeout(() => setMensagem(''), 4000)
+  }
+
+  const ordenados = [...chamados].sort((a, b) =>
+    String(b.dataCriacao || '').localeCompare(String(a.dataCriacao || '')),
+  )
+  const abertos = ordenados.filter((c) => (c.status || 'aberto') === 'aberto').length
+
+  return (
+    <section className="panel">
+      <div className="panel-header compact">
+        <div>
+          <span className="eyebrow">Suporte ao cliente</span>
+          <h3>Solicitações de atendimento ({chamados.length})</h3>
+        </div>
+      </div>
+
+      {abertos > 0 && (
+        <p style={{ color: '#b45309', background: '#fffbeb', padding: '10px', borderRadius: '8px', marginBottom: '12px' }}>
+          {abertos} solicitação(ões) aguardando primeiro atendimento.
+        </p>
+      )}
+
+      {mensagem && (
+        <p style={{ padding: '10px', background: '#f0fdf4', color: '#166534', borderRadius: '8px', marginBottom: '12px' }}>
+          {mensagem}
+        </p>
+      )}
+
+      {erro && (
+        <p style={{ padding: '10px', background: '#fef2f2', color: '#b91c1c', borderRadius: '8px', marginBottom: '12px' }}>
+          ⚠ {erro}
+        </p>
+      )}
+
+      {carregando ? (
+        <p style={{ color: '#64748b', padding: '12px 0' }}>Carregando solicitações...</p>
+      ) : ordenados.length === 0 ? (
+        <p style={{ color: '#64748b', padding: '12px 0' }}>Nenhuma solicitação registrada.</p>
+      ) : (
+        ordenados.map((chamado) => (
+          <div
+            key={chamado.id}
+            className="invoice-item"
+            style={{ marginBottom: '10px', padding: '12px', background: '#f8fafc', borderRadius: '10px' }}
+          >
+            <div>
+              <strong>{chamado.assunto || 'Solicitação sem assunto'}</strong>
+              <span className={`tag ${(chamado.status || 'aberto') === 'aberto' ? 'tag-warning' : 'tag-success'}`}>
+                {chamado.status || 'aberto'}
+              </span>
+              <small style={{ display: 'block', color: '#64748b' }}>
+                {nomeDoChamado(chamado)}
+                {chamado.clienteEmail ? ` · ${chamado.clienteEmail}` : ''}
+              </small>
+              <small style={{ display: 'block', color: '#94a3b8' }}>
+                {chamado.dataCriacao ? new Date(chamado.dataCriacao).toLocaleString('pt-BR') : 'Data não informada'}
+              </small>
+            </div>
+            <div className="invoice-actions" style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+              <button type="button" onClick={() => mudarStatus(chamado, 'em andamento')}>
+                Em andamento
+              </button>
+              <button type="button" onClick={() => mudarStatus(chamado, 'concluido')}>
+                Concluir
+              </button>
+            </div>
+          </div>
+        ))
+      )}
+    </section>
   )
 }
 
@@ -1676,15 +1859,46 @@ function PreCadastrosSection() {
     confirmarPreCadastro,
     descartarPreCadastro,
     updatePreCadastro,
+    // Associa a UC pendente a um cliente JÁ cadastrado (em vez de criar um
+    // cliente duplicado para a segunda UC do mesmo cliente)
+    associarUnidadeCliente,
+    getClientes,
     session,
   } = useAuth()
   const [preCadastros, setPreCadastros] = useDadosSincronizados(getPreCadastros, getPreCadastros())
+  const [clientes] = useDadosSincronizados(getClientes, getClientes())
   const [emRevisao, setEmRevisao] = useState(null) // pré-cadastro aberto no modal
   const [mensagem, setMensagem] = useState('')
+  // Cliente escolhido para receber a UC de cada pré-cadastro (preId → clienteId)
+  const [clienteEscolhido, setClienteEscolhido] = useState({})
 
   const refresh = () => setPreCadastros(getPreCadastros())
 
   const pendentes = preCadastros.filter((p) => p.status === 'PENDING_REVIEW')
+
+  /**
+   * Associa a UC do pré-cadastro a um cliente existente: grava a UC no cliente,
+   * vincula as faturas daquela UC e remove o pré-cadastro. Não cria cliente novo.
+   */
+  const handleAssociar = (pre) => {
+    const clienteId = clienteEscolhido[pre.id]
+    if (!clienteId) {
+      setMensagem('Selecione o cliente que já possui esta UC.')
+      setTimeout(() => setMensagem(''), 5000)
+      return
+    }
+    const resultado = associarUnidadeCliente(pre.uc, clienteId)
+    if (resultado.ok) {
+      const cliente = clientes.find((c) => String(c.id) === String(clienteId))
+      setMensagem(
+        `UC ${pre.uc} associada ao cliente ${cliente?.nome || ''} (${resultado.faturasVinculadas} fatura(s) vinculada(s)).`,
+      )
+      refresh()
+    } else {
+      setMensagem(resultado.message || 'Não foi possível associar esta UC.')
+    }
+    setTimeout(() => setMensagem(''), 8000)
+  }
 
   const handleConfirmar = (dadosEditados) => {
     const resultado = confirmarPreCadastro(emRevisao.id, dadosEditados, {
@@ -1756,6 +1970,47 @@ function PreCadastrosSection() {
                 <button type="button" onClick={() => setEmRevisao(pre)}>Revisar e confirmar</button>
                 <button type="button" onClick={() => handleDescartar(pre)}>Descartar</button>
               </div>
+            </div>
+
+            {/* Associação a um cliente existente: evita criar um cliente novo
+                quando a UC pertence a quem já é cliente (ex.: segunda UC). */}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '8px',
+                alignItems: 'center',
+                marginTop: '4px',
+                paddingTop: '8px',
+                borderTop: '1px dashed #fde68a',
+              }}
+            >
+              <span style={{ fontSize: '13px', color: '#92400e' }}>
+                Já é cliente? Associe a UC a ele:
+              </span>
+              <select
+                value={clienteEscolhido[pre.id] || ''}
+                onChange={(e) =>
+                  setClienteEscolhido((atual) => ({ ...atual, [pre.id]: e.target.value }))
+                }
+                style={{
+                  padding: '6px 10px',
+                  borderRadius: '8px',
+                  border: '1px solid #e2e8f0',
+                  fontSize: '13px',
+                  maxWidth: '100%',
+                }}
+              >
+                <option value="">Selecione o cliente...</option>
+                {clientes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.nome} {c.cpfCnpj ? `· ${c.cpfCnpj}` : ''}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="secondary-button" style={{ marginTop: 0 }} onClick={() => handleAssociar(pre)}>
+                Associar ao cliente
+              </button>
             </div>
           </div>
         ))
@@ -1971,10 +2226,12 @@ function RevisoesSection() {
     refresh()
   }
 
-  const rejeitarFatura = (id) => {
-    removeFatura(id)
-    setMensagem('Fatura removida do sistema.')
-    setTimeout(() => setMensagem(''), 3000)
+  const rejeitarFatura = async (id) => {
+    const resultado = await removeFatura(id)
+    // Se o banco recusar a exclusão, o usuário é avisado (a fatura voltaria na
+    // sincronização seguinte) em vez de receber a mensagem de sucesso.
+    setMensagem(resultado?.message || 'Fatura removida do sistema.')
+    setTimeout(() => setMensagem(''), resultado?.message ? 10000 : 3000)
     refresh()
   }
 
@@ -2110,7 +2367,7 @@ function UsuariosSection() {
             </div>
             <div className="field">
               <span>Senha *</span>
-              <input type="text" required value={form.senha} onChange={(e) => setForm((f) => ({ ...f, senha: e.target.value }))} />
+              <input type="password" required value={form.senha} onChange={(e) => setForm((f) => ({ ...f, senha: e.target.value }))} />
             </div>
             <div className="field">
               <span>Perfil *</span>
@@ -2181,10 +2438,17 @@ function RelatoriosSection() {
   const clientes = getClientes()
   const faturas = getFaturas()
 
+  // Escapa um campo do CSV: ";" ou quebra de linha dentro do valor quebravam a
+  // abertura da planilha. Usa aspas + escape padrão RFC 4180.
+  const csvCampo = (valor) =>
+    `"${String(valor ?? '').replace(/"/g, '""').replace(/\r?\n/g, ' ')}"`
+
   const dadosCSV = () => {
-    const header = 'Cliente;CPF/CNPJ;Referência;UC;Valor Original;Energia;Desconto 20%;Impostos;Valor Final;Consumo (kWh);Status;Vencimento'
+    const header = 'Cliente;CPF/CNPJ;Referência;UC;Valor da fatura;Energia elegível;Desconto 20%;Impostos;Valor final;Consumo (kWh);Status;Vencimento'
     const rows = faturas.map((f) => {
-      const cliente = clientes.find((c) => c.id === f.clienteId)
+      // O vínculo é id local OU UID — comparar só por `id` deixava a coluna
+      // CPF/CNPJ vazia depois que o cliente entrava no portal (clienteId vira UID).
+      const cliente = clientes.find((c) => registroPertenceAoCliente({ registro: f, cliente: c }))
       const calc = f.calculo || {}
       return [
         cliente?.nome || f.clienteNome || '',
@@ -2199,13 +2463,15 @@ function RelatoriosSection() {
         f.consumo || '',
         f.status || '',
         f.vencimento || '',
-      ].join(';')
+      ]
+        .map(csvCampo)
+        .join(';')
     })
     return [header, ...rows].join('\n')
   }
 
   const exportarCSV = () => {
-    const blob = new Blob([dadosCSV()], { type: 'text/csv;charset=utf-8;' })
+    const blob = new Blob(['\uFEFF' + dadosCSV()], { type: 'text/csv;charset=utf-8;' })
     const link = document.createElement('a')
     link.href = URL.createObjectURL(blob)
     link.download = `relatorio-faturas-${new Date().toISOString().slice(0, 10)}.csv`

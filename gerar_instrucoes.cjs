@@ -48,19 +48,6 @@ function desenharCabecalho(doc) {
   })
 }
 
-function desenharRodape(doc) {
-  const y = ALTURA_PAGINA - 30
-  doc.strokeColor(CORES.cinzaBorda).lineWidth(0.5)
-  doc.moveTo(MARGEM, y).lineTo(LARGURA_PAGINA - MARGEM, y).stroke()
-  doc.fillColor('#94a3b8').font('Helvetica').fontSize(8)
-  doc.text(
-    `Nature Force · Guia de Alimentação do Sistema · Página ${doc.page}`,
-    0,
-    y + 8,
-    { align: 'center', width: LARGURA_PAGINA },
-  )
-}
-
 function novaPagina(doc) {
   doc.addPage()
   desenharCabecalho(doc)
@@ -88,17 +75,6 @@ function subtitulo(doc, texto) {
 function paragrafo(doc, texto, tamanho = 10) {
   doc.fillColor(CORES.cinzaTexto)
   doc.font('Helvetica').fontSize(tamanho)
-  const linhas = doc.heightOfString(texto, { width: LARGURA_UTIL })
-  if (doc.y + linhas > ALTURA_PAGINA - 60) {
-    novaPagina(doc)
-  }
-  doc.text(texto, MARGEM, doc.y, { width: LARGURA_UTIL, lineGap: 4 })
-  doc.moveDown(0.5)
-}
-
-function paragrafoBold(doc, texto, tamanho = 10) {
-  doc.fillColor(CORES.cinzaTexto)
-  doc.font('Helvetica-Bold').fontSize(tamanho)
   const linhas = doc.heightOfString(texto, { width: LARGURA_UTIL })
   if (doc.y + linhas > ALTURA_PAGINA - 60) {
     novaPagina(doc)

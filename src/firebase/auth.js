@@ -4,8 +4,11 @@ import {
   signOut,
   sendPasswordResetEmail,
   onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  getAuth,
 } from 'firebase/auth'
-import { auth } from './config'
+import { initializeApp, deleteApp } from 'firebase/app'
+import { auth, firebaseConfig } from './config'
 
 // Login com e-mail e senha
 export const loginComEmail = async (email, senha) => {
@@ -103,6 +106,73 @@ export const entrarComoSessaoAdmin = async (email, senha) => {
         message = 'Erro ao autenticar no Firebase. Tente novamente.'
     }
     return { ok: false, motivo, message }
+  }
+}
+
+// ==================== Criação da conta do CLIENTE (provisionamento) ====================
+// Cria a conta do cliente no Firebase Authentication SEM encerrar a sessão do
+// administrador: uma instância SECUNDÁRIA do app é usada apenas para o cadastro
+// (`createUserWithEmailAndPassword`) e destruída no fim. A sessão principal
+// (admin) permanece intacta.
+//
+// Por que isso é necessário: sem uma conta no Firebase, o cliente só conseguia
+// entrar no navegador que tinha o cadastro no cache local (fallback offline) —
+// no celular dele o login falhava com "Credenciais inválidas".
+//
+// @returns {{ok:boolean, uid?:string, codigo?:string, message?:string}}
+export const criarContaCliente = async (email, senha) => {
+  const emailNormalizado = String(email || '').trim().toLowerCase()
+  const senhaInformada = String(senha || '')
+  const nomeApp = `natureforce-cliente-${Date.now()}`
+
+  let appSecundario
+  try {
+    appSecundario = initializeApp(firebaseConfig, nomeApp)
+    const authSecundario = getAuth(appSecundario)
+    const credencial = await createUserWithEmailAndPassword(
+      authSecundario,
+      emailNormalizado,
+      senhaInformada,
+    )
+    const uid = credencial.user.uid
+    await signOut(authSecundario)
+    return { ok: true, uid }
+  } catch (error) {
+    let message =
+      'Não foi possível criar o acesso do cliente. Verifique a conexão e tente novamente.'
+    switch (error?.code) {
+      case 'auth/email-already-in-use':
+        message = 'Já existe uma conta com este e-mail no Firebase Authentication.'
+        break
+      case 'auth/weak-password':
+        message = 'A senha é muito fraca: use pelo menos 6 caracteres.'
+        break
+      case 'auth/invalid-email':
+        message = 'E-mail inválido. Verifique o formato do e-mail de acesso.'
+        break
+      case 'auth/operation-not-allowed':
+        message =
+          'O provedor E-mail/Senha está DESATIVADO no Firebase. Ative em Authentication → Sign-in method → Email/Password.'
+        break
+      case 'auth/network-request-failed':
+        message = 'Sem conexão com a internet. Verifique sua rede e tente novamente.'
+        break
+      case 'auth/too-many-requests':
+        message = 'Muitas tentativas. Aguarde alguns minutos e tente novamente.'
+        break
+      default:
+        message = error?.message || message
+    }
+    return { ok: false, codigo: error?.code || 'auth/erro-desconhecido', message }
+  } finally {
+    // A instância secundária existe apenas para o cadastro — sempre é destruída.
+    if (appSecundario) {
+      try {
+        await deleteApp(appSecundario)
+      } catch {
+        /* instância já encerrada */
+      }
+    }
   }
 }
 

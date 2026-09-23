@@ -10,46 +10,45 @@ import {
   getIndiceSync,
   setIndiceSync,
 } from '../store/db'
-import { loginComEmail, logoutFirebase, observarAuth, entrarComoSessaoAdmin } from '../firebase/auth'
+import {
+  loginComEmail,
+  logoutFirebase,
+  observarAuth,
+  entrarComoSessaoAdmin,
+  criarContaCliente,
+} from '../firebase/auth'
 // Autorização administrativa — a MESMA lista usada nas Firestore Security Rules.
 import { ehEmailAdmin, podeAdministrar } from '../services/adminAccess'
 import {
   getClientePorUid,
   salvarCliente,
-  salvarFaturaProcessada,
   salvarFaturaIdempotente,
-  atualizarFatura,
-  getTodasFaturas,
-  getFaturasPorStatus,
   registrarProcessamento,
   atualizarProcessamento,
   criarRevisaoFatura,
-  getRevisoesPendentes,
-  atualizarRevisao,
   listarDocumentos,
   observarColecao,
-  observarClientePorUid,
   sincronizarColecaoRemota,
   removerDocumento,
   salvarDocumento,
+  LIMITE_LOGS,
 } from '../firebase/firestore'
-import { processarFatura, normalizarReferencia, normalizarVencimento } from '../services/faturaProcessor'
+import { normalizarReferencia, normalizarVencimento } from '../services/faturaNormalizacao'
 import { normalizarUC } from '../services/faturaDedup'
 import {
   COLECOES_SINCRONIZADAS,
   associarUCaCliente,
   atualizarIndiceRemoto,
-  filtrarFaturasDoCliente,
+  chaveUnica,
   idDocumento,
+  itemParaBanco,
   mesclarColecao,
+  normalizarEmail,
   novoId,
   propagarVinculoCliente,
   reconciliarComRemoto,
-  resumoProcessamento,
-  usuarioParaBanco,
 } from '../services/persistencia'
 import {
-  buscarClientePorUC,
   criarPreCadastro as criarPreCadastroService,
   confirmarPreCadastro as confirmarPreCadastroService,
   descartarPreCadastro as descartarPreCadastroService,
@@ -82,6 +81,11 @@ export function AuthProvider({ children }) {
   // feitas em outro dispositivo. Metadado de sincronização, não é dado de
   // negócio (fica fora das chaves de dados em store/db.js).
   const indiceSyncRef = useRef(getIndiceSync())
+
+  // Guarda (uid → timestamp) do último login registrado no histórico. Evita
+  // registros duplicados do MESMO acesso: `loginCliente` e
+  // `onAuthStateChanged` disparam no mesmo fluxo e um reload reautentica.
+  const loginsRegistradosRef = useRef({})
 
   // Versão dos dados locais: incrementada a cada escrita/hidratação para
   // forçar a re-renderização das telas que leem getStore() durante o render.
@@ -147,22 +151,54 @@ export function AuthProvider({ children }) {
   const sincronizarItem = useCallback(
     (colecao, item) => {
       if (!podeEscreverCompartilhado || !item) return
-      salvarDocumento(colecao, idDocumento(colecao, item), item).then((resultado) => {
-        if (resultado.ok) registrarSucessoSync(`${colecao}: ${idDocumento(colecao, item)}`)
+      // `itemParaBanco` remove credenciais (senha/senhaAcesso) antes de gravar:
+      // elas existem apenas no cache local deste navegador.
+      const payload = itemParaBanco(colecao, item)
+      salvarDocumento(colecao, idDocumento(colecao, payload), payload).then((resultado) => {
+        if (resultado.ok) registrarSucessoSync(`${colecao}: ${idDocumento(colecao, payload)}`)
         else registrarFalhaSync(resultado.message, resultado.codigo)
       })
     },
     [podeEscreverCompartilhado, registrarFalhaSync, registrarSucessoSync],
   )
 
+  /**
+   * Remove um registro do banco central.
+   * Retorna o resultado para que quem chamou possa informar o usuário quando a
+   * exclusão NÃO foi aceita — antes a falha era silenciosa e o registro
+   * reaparecia na sincronização seguinte.
+   * @returns {Promise<{ok:boolean, message?:string, codigo?:string}>}
+   */
   const sincronizarRemocao = useCallback(
     (colecao, id) => {
-      if (!podeEscreverCompartilhado || !id) return
-      removerDocumento(colecao, id).then((resultado) => {
+      if (!podeEscreverCompartilhado || !id) return Promise.resolve({ ok: true, ignorado: true })
+      return removerDocumento(colecao, id).then((resultado) => {
         if (!resultado.ok) registrarFalhaSync(resultado.message, resultado.codigo)
+        return resultado
       })
     },
     [podeEscreverCompartilhado, registrarFalhaSync],
+  )
+
+  /**
+   * Propaga ao banco central a EXCLUSÃO dos registros que saíram do cache local.
+   *
+   * `sincronizarColecao` apenas GRAVA: sem esta função, um registro removido
+   * localmente (ex.: pré-cadastro confirmado/descartado e suas faturas órfãs)
+   * continuava existindo no Firestore e voltava na sincronização seguinte.
+   *
+   * @param {string} colecao
+   * @param {Array} antes Estado da coleção ANTES da operação
+   * @param {Array} depois Estado da coleção DEPOIS da operação
+   */
+  const sincronizarRemocoesPorDiferenca = useCallback(
+    (colecao, antes = [], depois = []) => {
+      const chavesDepois = new Set(depois.map((item) => chaveUnica(colecao, item)))
+      antes
+        .filter((item) => !chavesDepois.has(chaveUnica(colecao, item)))
+        .forEach((item) => sincronizarRemocao(colecao, idDocumento(colecao, item)))
+    },
+    [sincronizarRemocao],
   )
 
   // Envia a coleção inteira para o Firestore (usado após operações em lote,
@@ -191,7 +227,33 @@ export function AuthProvider({ children }) {
       if (novo) sincronizarItem('logs', novo)
       return novo
     },
-    [podeEscreverCompartilhado, sincronizarItem],
+    [sincronizarItem],
+  )
+
+  /**
+   * Registra o login do cliente UMA única vez por sessão.
+   *
+   * Sem isso o histórico recebia "Login do cliente" duas vezes no mesmo acesso
+   * (loginCliente + onAuthStateChanged) e novamente a cada recarregamento da
+   * página — poluindo a auditoria e gravando no banco sem necessidade.
+   * @param {string} uid
+   * @param {string} nome
+   * @param {boolean} [local] Sessão sem Firebase (fallback offline)
+   */
+  const registrarLogin = useCallback(
+    (uid, nome, local = false) => {
+      if (!uid) return
+      const agora = Date.now()
+      const anterior = loginsRegistradosRef.current[String(uid)]
+      if (anterior && agora - anterior < 15000) return
+      loginsRegistradosRef.current[String(uid)] = agora
+      logar(
+        local ? 'Login do cliente (local)' : 'Login do cliente',
+        `${nome} acessou o portal`,
+        nome,
+      )
+    },
+    [logar],
   )
 
   /**
@@ -206,7 +268,10 @@ export function AuthProvider({ children }) {
       colecao,
       local: getStore(colecao),
       remoto: dadosRemotos,
-      chavesConhecidas: indiceSyncRef.current?.[colecao] || [],
+      // `logs` é lido com LIMITE (a coleção cresce continuamente): o que não veio
+      // nesta página NÃO foi excluído — por isso não há detecção de remoção.
+      // Sem isso, o histórico local seria apagado a cada leitura paginada.
+      chavesConhecidas: colecao === 'logs' ? [] : indiceSyncRef.current?.[colecao] || [],
       preservarCampos: colecao === 'usuarios' ? ['senha'] : [],
     })
 
@@ -238,9 +303,22 @@ export function AuthProvider({ children }) {
     (cliente) => {
       if (!podeEscreverCompartilhado || !cliente) return
       const id = idDocumento('clientes', cliente)
-      salvarDocumento('clientes', id, cliente).then((resultado) => {
-        if (resultado.ok) registrarSucessoSync(`cliente ${cliente.nome || id}`)
-        else registrarFalhaSync(resultado.message, resultado.codigo)
+      // Nunca espelha senha de acesso (ver itemParaBanco).
+      salvarDocumento('clientes', id, itemParaBanco('clientes', cliente)).then((resultado) => {
+        if (!resultado.ok) {
+          registrarFalhaSync(resultado.message, resultado.codigo)
+          return
+        }
+        registrarSucessoSync(`cliente ${cliente.nome || id}`)
+
+        // Higiene de dados: o cadastro pode ter ficado com DOIS documentos no
+        // banco — um com o id local (criado antes do vínculo com o Firebase) e
+        // outro com o UID. Sem remover o legado, o painel lia versões
+        // diferentes conforme a ordem de retorno do Firestore. A remoção é
+        // idempotente (documento inexistente = sucesso) e nunca bloqueia a UI.
+        if (cliente.uid && cliente.id && String(cliente.id) !== String(cliente.uid)) {
+          removerDocumento('clientes', String(cliente.id)).then(() => {}).catch(() => {})
+        }
       })
     },
     [podeEscreverCompartilhado, registrarFalhaSync, registrarSucessoSync],
@@ -267,7 +345,12 @@ export function AuthProvider({ children }) {
     let falhaCritica = null
 
     for (const colecao of COLECOES_SINCRONIZADAS) {
-      const resultado = await listarDocumentos(colecao)
+      const resultado = await listarDocumentos(
+        colecao,
+        // Coleções que crescem continuamente são lidas com limite (paginação
+        // simples) — antes o histórico inteiro de logs vinha a cada entrada.
+        colecao === 'logs' ? { limite: LIMITE_LOGS } : {},
+      )
       if (!resultado.ok) {
         falhas.push({ colecao, codigo: resultado.codigo, message: resultado.message })
         if (['clientes', 'unidades', 'faturas', 'preCadastros'].includes(colecao)) {
@@ -315,15 +398,19 @@ export function AuthProvider({ children }) {
     if (!podeEscreverCompartilhado) return undefined
 
     const desobservar = COLECOES_SINCRONIZADAS.map((colecao) =>
-      observarColecao(colecao, (resultado) => {
-        if (!resultado.ok) {
-          registrarFalhaSync(resultado.message, resultado.codigo)
-          return
-        }
-        aplicarDadosRemotos(colecao, resultado.data)
-        setIndiceSync(indiceSyncRef.current)
-        bumpVersao()
-      }),
+      observarColecao(
+        colecao,
+        (resultado) => {
+          if (!resultado.ok) {
+            registrarFalhaSync(resultado.message, resultado.codigo)
+            return
+          }
+          aplicarDadosRemotos(colecao, resultado.data)
+          setIndiceSync(indiceSyncRef.current)
+          bumpVersao()
+        },
+        colecao === 'logs' ? { limite: LIMITE_LOGS } : {},
+      ),
     )
 
     return () => desobservar.forEach((desinscrever) => desinscrever())
@@ -389,19 +476,33 @@ export function AuthProvider({ children }) {
 
       // Espelha o cadastro (com o UID) no banco compartilhado. O próprio cliente
       // autenticado pode gravar o seu documento (isOwner nas security rules).
-      salvarDocumento('clientes', uid, { ...vinculo.cliente, uid }).then((resultado) => {
-        if (!resultado.ok) registrarFalhaSync(resultado.message, resultado.codigo)
-      })
-
-      logar(
-        'Vínculo UID',
-        `Cliente ${vinculo.cliente.nome || uid} vinculado ao Firebase (${vinculo.propagados} registro(s) propagado(s))`,
-        'Sistema',
+      //
+      // A gravação é PULADA quando o vínculo já existe nos dois lados: antes,
+      // cada recarregamento de página regravava o cadastro e criava um log —
+      // escrita desnecessária no banco e auditoria inflada.
+      const jaVinculadoNoBanco = Boolean(
+        dadosRemotos && clienteLocal && String(clienteLocal.uid || '') === String(uid),
       )
+
+      if (!jaVinculadoNoBanco) {
+        salvarDocumento(
+          'clientes',
+          uid,
+          itemParaBanco('clientes', { ...vinculo.cliente, uid }),
+        ).then((resultado) => {
+          if (!resultado.ok) registrarFalhaSync(resultado.message, resultado.codigo)
+        })
+
+        logar(
+          'Vínculo UID',
+          `Cliente ${vinculo.cliente.nome || uid} vinculado ao Firebase (${vinculo.propagados} registro(s) propagado(s))`,
+          'Sistema',
+        )
+      }
 
       return vinculo.cliente
     },
-    [bumpVersao, registrarFalhaSync],
+    [bumpVersao, registrarFalhaSync, logar],
   )
 
   // Observa o estado de autenticação do Firebase
@@ -410,6 +511,9 @@ export function AuthProvider({ children }) {
       if (user) {
         const uid = user.uid
         const emailUsuario = user.email || ''
+        // Recarregar a página restaura a sessão (uid já presente) — isso NÃO é
+        // um novo login e não deve gerar registro no histórico.
+        const jaEraSessaoDoUsuario = String(sessaoRef.current?.uid || '') === String(uid)
 
         // ===== PROTEÇÃO DA SESSÃO ADMINISTRATIVA =====
         // O login administrativo TAMBÉM autentica no Firebase e dispara este
@@ -452,7 +556,7 @@ export function AuthProvider({ children }) {
           loginEm: new Date().toLocaleString('pt-BR'),
         }
         aplicarSessao(novaSessao)
-        logar('Login do cliente', `${novaSessao.nome} acessou o portal`, novaSessao.nome)
+        if (!jaEraSessaoDoUsuario) registrarLogin(uid, novaSessao.nome)
       } else {
         // Usuário deslogado no Firebase. Só encerra a sessão se ela DEPENDE do
         // Firebase (uid presente). Sessão puramente local (admin offline) não
@@ -463,7 +567,7 @@ export function AuthProvider({ children }) {
     })
 
     return () => unsubscribe()
-  }, [vincularClienteAoUid, aplicarSessao, logar])
+  }, [vincularClienteAoUid, aplicarSessao, registrarLogin])
 
   const loginAdmin = async (email, senha) => {
     const emailNormalizado = String(email || '').trim().toLowerCase()
@@ -511,7 +615,8 @@ export function AuthProvider({ children }) {
             origem: 'FIREBASE',
           }
       if (!existente) setStore('usuarios', [...usuarios, usuarioRegistro])
-      sincronizarItem('usuarios', usuarioParaBanco(usuarioRegistro))
+      // sincronizarItem remove a senha antes de gravar (ver itemParaBanco).
+      sincronizarItem('usuarios', usuarioRegistro)
 
       const novaSessao = {
         tipo: 'admin',
@@ -607,7 +712,10 @@ export function AuthProvider({ children }) {
       // preso no cache do navegador).
       const dadosParaEspelhar = dadosRemotos || clienteVinculado
       if (!dadosRemotos && dadosParaEspelhar) {
-        const espelho = await salvarCliente(uid, { ...dadosParaEspelhar, uid, ativo: true })
+        const espelho = await salvarCliente(
+          uid,
+          itemParaBanco('clientes', { ...dadosParaEspelhar, uid, ativo: true }),
+        )
         if (!espelho.ok) {
           registrarFalhaSync(
             'Não foi possível salvar seu cadastro no banco central. Tente novamente.',
@@ -626,7 +734,7 @@ export function AuthProvider({ children }) {
         loginEm: new Date().toLocaleString('pt-BR'),
       }
       aplicarSessao(novaSessao)
-      logar('Login do cliente', `${novaSessao.nome} acessou o portal`, novaSessao.nome)
+      registrarLogin(uid, novaSessao.nome)
       return { ok: true }
     }
 
@@ -652,7 +760,7 @@ export function AuthProvider({ children }) {
       }
 
       aplicarSessao(novaSessao)
-      logar('Login do cliente (local)', `${cliente.nome} acessou o portal`, cliente.nome)
+      registrarLogin(cliente.id, cliente.nome, true)
       return { ok: true }
     }
 
@@ -743,13 +851,41 @@ export function AuthProvider({ children }) {
     return { ok: true }
   }
 
-  const removeCliente = (id) => {
+  /**
+   * Remove o cadastro do cliente.
+   *
+   * O cadastro pode existir em DOIS documentos no banco (id local gerado pelo
+   * painel + documento com o UID) — os dois são removidos. Se o banco recusar
+   * (ex.: Security Rules antigas sem permissão de delete para o admin), o
+   * usuário é AVISADO em vez de acreditar que excluiu.
+   * @returns {Promise<{ok:boolean, message?:string}>}
+   */
+  const removeCliente = async (id) => {
     const clientes = getStore('clientes')
     const cliente = clientes.find((c) => String(c.id) === String(id))
     setStore('clientes', clientes.filter((c) => String(c.id) !== String(id)))
-    if (cliente) sincronizarRemocao('clientes', idDocumento('clientes', cliente))
+
+    let falha = null
+    if (cliente) {
+      const idsParaRemover = new Set([idDocumento('clientes', cliente)])
+      if (cliente.id) idsParaRemover.add(String(cliente.id))
+      for (const docId of idsParaRemover) {
+        const resultado = await sincronizarRemocao('clientes', docId)
+        if (!resultado.ok) falha = resultado
+      }
+    }
+
     bumpVersao()
-    logar('Cliente removido', `Cliente ID ${id} removido`, session?.nome || 'Sistema')
+    logar('Cliente removido', `Cliente ${cliente?.nome || id} removido`, session?.nome || 'Sistema')
+
+    if (falha) {
+      return {
+        ok: false,
+        message:
+          'A exclusão não foi aceita pelo banco central — o cadastro continua sincronizado e pode reaparecer. ' +
+          'Publique as Security Rules atualizadas (delete de clientes permitido ao administrador) e tente novamente.',
+      }
+    }
     return { ok: true }
   }
 
@@ -843,12 +979,27 @@ export function AuthProvider({ children }) {
     return { ok: true, unidade }
   }
 
-  const removeUnidade = (id) => {
-    const unidades = getStore('unidades').filter((u) => u.id !== id)
-    setStore('unidades', unidades)
-    sincronizarRemocao('unidades', id)
+  /**
+   * Remove uma unidade consumidora. Aqui o id local É o id do documento no
+   * banco, então a remoção remota funciona direto.
+   * @returns {Promise<{ok:boolean, message?:string}>}
+   */
+  const removeUnidade = async (id) => {
+    const unidades = getStore('unidades')
+    const unidade = unidades.find((u) => String(u.id) === String(id))
+    setStore('unidades', unidades.filter((u) => String(u.id) !== String(id)))
+
+    const resultado = await sincronizarRemocao('unidades', id)
     bumpVersao()
-    logar('UC removida', `UC ID ${id} removida`, session?.nome || 'Sistema')
+    logar('UC removida', `UC ${unidade?.numeroUC || id} removida`, session?.nome || 'Sistema')
+
+    if (!resultado.ok) {
+      return {
+        ok: false,
+        message:
+          'A UC foi removida deste navegador, mas o banco central recusou a exclusão. Verifique a conexão e tente novamente.',
+      }
+    }
     return { ok: true }
   }
 
@@ -894,12 +1045,36 @@ export function AuthProvider({ children }) {
     return { ok: true }
   }
 
-  const removeFatura = (id) => {
-    const faturas = getStore('faturas').filter((f) => String(f.id) !== String(id))
-    setStore('faturas', faturas)
-    sincronizarRemocao('faturas', id)
+  /**
+   * Remove uma fatura.
+   *
+   * O registro no cache local usa um id interno, mas o documento no Firestore
+   * tem ID DETERMINÍSTICO (`idFatura`, ex.: `fat_ab12cd34`) — a exclusão remota
+   * precisa de `idDocumento`. Antes o id interno era enviado ao banco: nada era
+   * apagado e a fatura reaparecia na sincronização seguinte.
+   * @returns {Promise<{ok:boolean, message?:string}>}
+   */
+  const removeFatura = async (id) => {
+    const faturas = getStore('faturas')
+    const fatura = faturas.find((f) => String(f.id) === String(id))
+    setStore('faturas', faturas.filter((f) => String(f.id) !== String(id)))
+
+    let falha = null
+    if (fatura) {
+      const resultado = await sincronizarRemocao('faturas', idDocumento('faturas', fatura))
+      if (!resultado.ok) falha = resultado
+    }
+
     bumpVersao()
-    logar('Fatura removida', `Fatura ID ${id} removida`, session?.nome || 'Sistema')
+    logar('Fatura removida', `Fatura ${fatura?.arquivo || id} removida`, session?.nome || 'Sistema')
+
+    if (falha) {
+      return {
+        ok: false,
+        message:
+          'A fatura foi removida deste navegador, mas o banco central recusou a exclusão. Verifique a conexão e tente novamente.',
+      }
+    }
     return { ok: true }
   }
 
@@ -920,10 +1095,12 @@ export function AuthProvider({ children }) {
       return { ok: false, message: 'Cliente não encontrado para associar esta UC.' }
     }
 
+    const preCadastrosAntes = getStore('preCadastros')
+
     const resultado = associarUCaCliente({
       unidades: getStore('unidades'),
       faturas: getStore('faturas'),
-      preCadastros: getStore('preCadastros'),
+      preCadastros: preCadastrosAntes,
       uc,
       cliente,
       usuario: session?.nome || 'Sistema',
@@ -943,7 +1120,10 @@ export function AuthProvider({ children }) {
     resultado.faturas
       .filter((f) => idsFaturasVinculadas.includes(f.id))
       .forEach((f) => sincronizarItem('faturas', f))
-    sincronizarRemocao('preCadastros', resultado.unidade?.id || uc)
+    // O pré-cadastro daquela UC deixa de existir: a EXCLUSÃO precisa ser
+    // propagada ao banco. Antes era enviado o id da UNIDADE/UC e o pré-cadastro
+    // reaparecia na sincronização seguinte.
+    sincronizarRemocoesPorDiferenca('preCadastros', preCadastrosAntes, resultado.preCadastros)
     bumpVersao()
 
     logar(
@@ -960,42 +1140,94 @@ export function AuthProvider({ children }) {
   }
 
   /**
-   * Faturas visíveis para um cliente (isolamento garantido por UID + UCs).
-   * @param {{clienteId?:string, uids?:Array<string>, ucs?:Array<string>}} params
+   * Cria a CONTA DE ACESSO do cliente no Firebase Authentication e vincula o
+   * UID ao cadastro (propagando para UCs e faturas).
+   *
+   * Por que existe: o administrador cadastra o cliente com e-mail e senha de
+   * acesso, mas a autenticação real acontece no Firebase. Sem esta conta o
+   * cliente só conseguia entrar no navegador que tinha o cadastro no cache
+   * local (no celular dele o login falhava com "Credenciais inválidas").
+   *
+   * A conta é criada por uma instância SECUNDÁRIA do Firebase — a sessão do
+   * administrador permanece intacta (ver firebase/auth.js).
+   *
+   * @param {string|number} clienteId
+   * @returns {Promise<{ok:boolean, message:string, uid?:string, jaExistia?:boolean}>}
    */
-  const getFaturasVisiveisDoCliente = ({ clienteId, uids = [], ucs = [] }) =>
-    filtrarFaturasDoCliente({ faturas: getStore('faturas'), clienteId, uids, ucs })
+  const provisionarAcessoCliente = async (clienteId) => {
+    const clientes = getStore('clientes')
+    const cliente = clientes.find((c) => String(c.id) === String(clienteId))
+    if (!cliente) return { ok: false, message: 'Cliente não encontrado.' }
+
+    if (cliente.uid) {
+      return {
+        ok: true,
+        jaExistia: true,
+        uid: cliente.uid,
+        message: 'Este cliente já possui acesso criado.',
+      }
+    }
+
+    const email = normalizarEmail(cliente.emailAcesso)
+    const senha = String(cliente.senhaAcesso || '')
+    if (!email || !senha) {
+      return {
+        ok: false,
+        message:
+          'Informe o e-mail de acesso e a senha do cliente (Editar) antes de criar o acesso.',
+      }
+    }
+
+    const conta = await criarContaCliente(email, senha)
+
+    if (!conta.ok && conta.codigo === 'auth/email-already-in-use') {
+      // A conta já existe no Firebase (criada no Console ou em outro momento).
+      // Sem o SDK Admin não é possível descobrir o UID — orientamos o caminho.
+      return {
+        ok: false,
+        codigo: conta.codigo,
+        message:
+          'Já existe uma conta com este e-mail no Firebase. O cliente pode entrar com a senha atual; se não lembrar dela, use "Recuperar senha" na tela de login.',
+      }
+    }
+    if (!conta.ok) return { ok: false, codigo: conta.codigo, message: conta.message }
+
+    // Vincula o UID ao cadastro local/banco e propaga para UCs e faturas.
+    vincularClienteAoUid(conta.uid, { email })
+    updateCliente(clienteId, {
+      uid: conta.uid,
+      contaFirebase: true,
+      acessoCriadoEm: new Date().toLocaleString('pt-BR'),
+    })
+    logar(
+      'Acesso do cliente criado',
+      `Conta de acesso criada para ${email}`,
+      session?.nome || 'Sistema',
+    )
+
+    return {
+      ok: true,
+      uid: conta.uid,
+      message:
+        'Acesso criado com sucesso! O cliente já pode entrar com o e-mail e a senha cadastrados.',
+    }
+  }
 
   // ==================== Processamento de Faturas (PDF) ====================
 
-  // Processa um PDF de fatura e retorna os dados extraídos e calculados
+  // Processa um PDF de fatura e retorna os dados extraídos e calculados.
+  // IMPORTAÇÃO DINÂMICA: o pdf.js (~1,5 MB) só é baixado/carregado no momento
+  // em que um administrador importa de fato um PDF — a tela de login e os
+  // dashboards não carregam o processador.
   const processarPDF = async (arquivoPDF) => {
+    const { processarFatura } = await import('../services/faturaProcessor')
     return await processarFatura(arquivoPDF)
   }
 
-  // Salva uma fatura processada no Firestore
-  const salvarFaturaFirestore = async (dados) => {
-    return await salvarFaturaProcessada(dados)
-  }
-
-  // Salva uma fatura no Firestore de forma idempotente (impede duplicação)
+  // Salva uma fatura processada no Firestore de forma IDEMPOTENTE (impede
+  // duplicação) — é o único caminho de gravação usado pelo pipeline de PDF.
   const salvarFaturaIdempotenteFirestore = async (dados) => {
     return await salvarFaturaIdempotente(dados)
-  }
-
-  // Atualiza uma fatura no Firestore
-  const atualizarFaturaFirestore = async (faturaId, dados) => {
-    return await atualizarFatura(faturaId, dados)
-  }
-
-  // Busca todas as faturas do Firestore
-  const buscarTodasFaturas = async () => {
-    return await getTodasFaturas()
-  }
-
-  // Busca faturas por status no Firestore
-  const buscarFaturasPorStatus = async (status) => {
-    return await getFaturasPorStatus(status)
   }
 
   // Registra o processamento de uma fatura
@@ -1013,16 +1245,6 @@ export function AuthProvider({ children }) {
     return await criarRevisaoFatura(dados)
   }
 
-  // Busca revisões pendentes
-  const buscarRevisoesPendentes = async () => {
-    return await getRevisoesPendentes()
-  }
-
-  // Atualiza uma revisão
-  const atualizarRevisaoFatura = async (revisaoId, dados) => {
-    return await atualizarRevisao(revisaoId, dados)
-  }
-
   // Normaliza a referência extraída do PDF
   const normalizarRef = (referencia) => normalizarReferencia(referencia)
 
@@ -1038,8 +1260,6 @@ export function AuthProvider({ children }) {
 
   const getPreCadastros = () => getStore('preCadastros')
 
-  const identificarClientePorUC = (uc) => buscarClientePorUC(uc)
-
   const addPreCadastro = (dados, contexto) => {
     const resultado = criarPreCadastroService(dados, contexto)
     if (resultado.ok && resultado.preCadastro) {
@@ -1050,23 +1270,42 @@ export function AuthProvider({ children }) {
   }
 
   const confirmarPreCadastro = (id, dadosEditados, contexto) => {
+    const antes = {
+      faturas: getStore('faturas'),
+      preCadastros: getStore('preCadastros'),
+    }
+
     const resultado = confirmarPreCadastroService(id, dadosEditados, contexto)
     if (resultado.ok) {
-      // O pré-cadastro gerou cliente + unidade e reapontou as faturas
+      // O pré-cadastro gerou cliente + unidade e reapontou as faturas.
+      // `sincronizarColecao` GRAVA o estado atual; as EXCLUSÕES (o pré-cadastro
+      // confirmado deixa de existir) são propagadas por diferença — sem isso o
+      // documento continuava no banco e o pré-cadastro voltava na sincronização.
       sincronizarColecao('clientes')
       sincronizarColecao('unidades')
       sincronizarColecao('faturas')
       sincronizarColecao('preCadastros')
+      sincronizarRemocoesPorDiferenca('preCadastros', antes.preCadastros, getStore('preCadastros'))
+      sincronizarRemocoesPorDiferenca('faturas', antes.faturas, getStore('faturas'))
       bumpVersao()
     }
     return resultado
   }
 
   const descartarPreCadastro = (id, contexto) => {
+    const antes = {
+      faturas: getStore('faturas'),
+      preCadastros: getStore('preCadastros'),
+    }
+
     const resultado = descartarPreCadastroService(id, contexto)
     if (resultado.ok) {
+      // O descarte remove o pré-cadastro E as faturas órfãs dele: as duas
+      // exclusões precisam chegar ao banco central.
       sincronizarColecao('preCadastros')
       sincronizarColecao('faturas')
+      sincronizarRemocoesPorDiferenca('preCadastros', antes.preCadastros, getStore('preCadastros'))
+      sincronizarRemocoesPorDiferenca('faturas', antes.faturas, getStore('faturas'))
       bumpVersao()
     }
     return resultado
@@ -1097,8 +1336,9 @@ export function AuthProvider({ children }) {
       ...dados,
     }
     setStore('usuarios', [...usuarios, novo])
-    // Espelha no banco central SEM a senha (credenciais vivem no Firebase Auth)
-    sincronizarItem('usuarios', usuarioParaBanco(novo))
+    // `sincronizarItem` espelha no banco central SEM a senha (credenciais vivem
+    // no Firebase Authentication — ver itemParaBanco).
+    sincronizarItem('usuarios', novo)
     logar('Usuário administrativo criado', `${novo.nome} (${novo.perfil})`, session?.nome || 'Sistema')
     return { ok: true }
   }
@@ -1136,6 +1376,8 @@ export function AuthProvider({ children }) {
     updateCliente,
     toggleClienteAtivo,
     removeCliente,
+    // Cria a conta de acesso do cliente no Firebase Authentication
+    provisionarAcessoCliente,
     getUnidades,
     addUnidade,
     updateUnidade,
@@ -1144,29 +1386,24 @@ export function AuthProvider({ children }) {
     addFatura,
     updateFatura,
     removeFatura,
+    // Associação manual de uma UC (fatura pendente) a um cliente JÁ cadastrado
+    associarUnidadeCliente,
     getUsuarios,
     addUsuario,
     removeUsuario,
     getLogs,
     // Auto-cadastro por fatura
     getPreCadastros,
-    identificarClientePorUC,
     addPreCadastro,
     confirmarPreCadastro,
     descartarPreCadastro,
     updatePreCadastro,
     // Processamento de faturas
     processarPDF,
-    salvarFaturaFirestore,
     salvarFaturaIdempotenteFirestore,
-    atualizarFaturaFirestore,
-    buscarTodasFaturas,
-    buscarFaturasPorStatus,
     registrarProcessamentoFatura,
     atualizarProcessamentoFatura,
     criarRevisao,
-    buscarRevisoesPendentes,
-    atualizarRevisaoFatura,
     normalizarRef,
     normalizarVenc,
   }

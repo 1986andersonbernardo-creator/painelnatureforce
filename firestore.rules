@@ -39,13 +39,20 @@ service cloud.firestore {
     match /clientes/{clienteId} {
       allow read: if isOwner(clienteId) || isAdmin();
 
-      allow create: if (isOwner(clienteId)
-                    && request.resource.data.email == request.auth.token.email)
-                    || isAdmin();
+      // Criação: o próprio cliente cria o SEU documento (id = UID) ou o admin
+      // cria o cadastro. A checagem antiga exigia `request.resource.data.email`
+      // igual ao e-mail do token, mas o cadastro guarda o e-mail de CONTATO
+      // (o e-mail de login fica em `emailAcesso`) — a gravação era negada sem
+      // o usuário entender o motivo. `isOwner(clienteId)` já impede que alguém
+      // crie/altere o documento de outra pessoa (o id do documento é o UID).
+      allow create: if isOwner(clienteId) || isAdmin();
 
       allow update: if isOwner(clienteId) || isAdmin();
 
-      allow delete: if false; // Cliente não pode excluir a própria conta
+      // Exclusão: SOMENTE o administrador. Antes era `false` para todos e o
+      // botão "Remover cliente" do painel falhava em silêncio (o Firestore
+      // negava o delete e o cadastro reaparecia na sincronização seguinte).
+      allow delete: if isAdmin();
     }
 
     // ==================== UNIDADES CONSUMIDORAS (UC) ====================

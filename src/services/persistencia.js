@@ -122,9 +122,46 @@ export const idDocumento = (colecao, item) => {
  */
 export const usuarioParaBanco = (usuario) => {
   if (!usuario || typeof usuario !== 'object') return usuario
-  const { senha, ...resto } = usuario
+  const { senha: _senha, ...resto } = usuario
   return resto
 }
+
+/**
+ * Payload de um CLIENTE para o banco central — NUNCA inclui a senha de acesso.
+ * A senha do cliente (`senhaAcesso`) existe apenas para o espelhamento local do
+ * cadastro criado pelo administrador; ela não deve trafegar nem ficar legível
+ * no banco compartilhado (o acesso do cliente é criado no Firebase
+ * Authentication — ver `criarContaCliente` em firebase/auth.js).
+ * @param {Object} cliente
+ * @returns {Object} Registro sem `senhaAcesso`
+ */
+export const clienteParaBanco = (cliente) => {
+  if (!cliente || typeof cliente !== 'object') return cliente
+  const { senhaAcesso: _senhaAcesso, ...resto } = cliente
+  return resto
+}
+
+/**
+ * Payload de UM registro para o banco central, conforme a coleção.
+ * Ponto único de sanitização: credenciais nunca são espelhadas.
+ * @param {string} colecao
+ * @param {Object} item
+ * @returns {Object}
+ */
+export const itemParaBanco = (colecao, item) => {
+  if (colecao === 'usuarios') return usuarioParaBanco(item)
+  if (colecao === 'clientes') return clienteParaBanco(item)
+  return item
+}
+
+/**
+ * Payload de uma COLEÇÃO inteira para o banco central (mesma sanitização).
+ * @param {string} colecao
+ * @param {Array} itens
+ * @returns {Array}
+ */
+export const itensParaBanco = (colecao, itens = []) =>
+  itens.map((item) => itemParaBanco(colecao, item))
 
 /**
  * Converte as datas usadas no sistema ("dd/mm/yyyy hh:mm:ss", "dd/mm/yyyy" ou

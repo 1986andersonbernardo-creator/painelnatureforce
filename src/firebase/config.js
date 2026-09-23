@@ -16,6 +16,10 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID || '1:929576581876:web:d3768e269d78d9643efca1',
 }
 
+// Exportado para permitir uma instância SECUNDÁRIA do Firebase (criação da
+// conta do cliente sem encerrar a sessão do administrador — ver auth.js).
+export { firebaseConfig }
+
 const app = initializeApp(firebaseConfig)
 export const auth = getAuth(app)
 export const db = getFirestore(app)

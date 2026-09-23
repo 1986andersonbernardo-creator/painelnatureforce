@@ -31,6 +31,8 @@ import {
   validarBytesPDF,
   validarArquivoPDF,
 } from '../src/services/pdfValidacao.js'
+// Módulo puro separado (sem pdf.js) — normalização de campos extraídos.
+import { normalizarReferencia, normalizarVencimento } from '../src/services/faturaNormalizacao.js'
 
 // ==================== Cenário-base ====================
 const clientes = [
@@ -484,5 +486,25 @@ test('22. UC lida no PDF e não cadastrada → REVISAO_MANUAL (nunca cria client
   assert.equal(decisao.decisao, DECISAO.REVISAO_MANUAL)
   assert.equal(decisao.motivo, MOTIVO_REVISAO.UC_NAO_ENCONTRADA)
   assert.equal(decisao.cliente, null, 'nunca inventar/associar cliente automaticamente')
+})
+
+// ===================== 23. Normalização (módulo puro separado) =====================
+test('23. Referência e vencimento extraídos são normalizados nos formatos usados pelo pipeline', () => {
+  // Referência: "AGO/2026", "08/2026" e ISO → "YYYY-MM"
+  assert.equal(normalizarReferencia('AGO/2026'), '2026-08')
+  assert.equal(normalizarReferencia('DEZ/2025'), '2025-12')
+  assert.equal(normalizarReferencia('08/2026'), '2026-08')
+  assert.equal(normalizarReferencia('2026-08'), '2026-08')
+  assert.equal(normalizarReferencia(''), '')
+  assert.equal(normalizarReferencia(null), '')
+
+  // Vencimento: "18/09/2026" → "2026-09-18"
+  assert.equal(normalizarVencimento('18/09/2026'), '2026-09-18')
+  assert.equal(normalizarVencimento(''), '')
+  assert.equal(normalizarVencimento(null), '')
+
+  // Formato não reconhecido devolve o valor original (nunca inventa data)
+  assert.equal(normalizarReferencia('sem-data'), 'sem-data')
+  assert.equal(normalizarVencimento('data desconhecida'), 'data desconhecida')
 })
 

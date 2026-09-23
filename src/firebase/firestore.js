@@ -14,10 +14,30 @@ import {
   addDoc,
   deleteDoc,
   onSnapshot,
+  limit,
+  deleteField,
 } from 'firebase/firestore'
 import { db } from './config'
 import { gerarIdFatura, montarChaveIdempotencia } from '../services/faturaDedup'
-import { idDocumento } from '../services/persistencia'
+import { idDocumento, itemParaBanco } from '../services/persistencia'
+
+// Limpeza automática de credenciais legadas: versões anteriores gravaram
+// `senha`/`senhaAcesso` no Firestore. Escrevendo `deleteField()` nesses campos a
+// cada espelhamento, qualquer senha antiga que ainda exista no banco é REMOVIDA
+// no próximo salvamento (só limpar o cache local não bastava: o dado já estava lá).
+const camposSensiveis = (colecao) =>
+  colecao === 'usuarios'
+    ? { senha: deleteField() }
+    : colecao === 'clientes'
+      ? { senha: deleteField(), senhaAcesso: deleteField() }
+      : null
+
+// Limites de leitura das coleções que crescem continuamente (`logs` de
+// auditoria e `atendimento`). Sem limite, cada entrada do painel lia a coleção
+// INTEIRA — custo e tempo de resposta crescendo para sempre.
+export const LIMITE_LOGS = 400
+export const LIMITE_CHAMADOS = 300
+
 // ==================== CLIENTES ====================
 
 // Busca o documento do cliente pelo UID (o UID é o ID do documento)
@@ -56,21 +76,6 @@ export const atualizarCliente = async (uid, dados) => {
 
 // ==================== FATURAS ====================
 
-// Busca faturas do cliente autenticado (filtrado por clienteId = UID)
-export const getFaturasDoCliente = async (uid) => {
-  try {
-    const q = query(collection(db, 'faturas'), where('clienteId', '==', uid))
-    const querySnapshot = await getDocs(q)
-    const faturas = []
-    querySnapshot.forEach((docSnap) => {
-      faturas.push({ id: docSnap.id, ...docSnap.data() })
-    })
-    return { ok: true, data: dedupeFaturas(faturas) }
-  } catch {
-    return { ok: false, message: 'Erro ao buscar faturas.' }
-  }
-}
-
 // Observa faturas do cliente em tempo real
 export const observarFaturasDoCliente = (uid, callback) => {
   const q = query(collection(db, 'faturas'), where('clienteId', '==', uid))
@@ -87,26 +92,6 @@ export const observarFaturasDoCliente = (uid, callback) => {
       callback({ ok: false, message: 'Erro ao buscar faturas.' })
     },
   )
-}
-
-// Salva uma fatura processada no Firestore
-export const salvarFaturaProcessada = async (dados) => {
-  try {
-    const docRef = await addDoc(collection(db, 'faturas'), dados)
-    return { ok: true, id: docRef.id }
-  } catch {
-    return { ok: false, message: 'Erro ao salvar fatura processada.' }
-  }
-}
-
-// Atualiza uma fatura existente
-export const atualizarFatura = async (faturaId, dados) => {
-  try {
-    await updateDoc(doc(db, 'faturas', faturaId), dados)
-    return { ok: true }
-  } catch {
-    return { ok: false, message: 'Erro ao atualizar fatura.' }
-  }
 }
 
 // Salva uma fatura de forma IDEMPOTENTE no Firestore.
@@ -143,47 +128,6 @@ export const salvarFaturaIdempotente = async (dados) => {
     return { ok: true, id }
   } catch {
     return { ok: false, message: 'Erro ao salvar fatura processada.' }
-  }
-}
-
-// Busca uma fatura pelo ID (useful para conferir duplicatas)
-export const getFaturaPorId = async (faturaId) => {
-  try {
-    const docSnap = await getDoc(doc(db, 'faturas', faturaId))
-    return docSnap.exists()
-      ? { ok: true, data: { id: docSnap.id, ...docSnap.data() } }
-      : { ok: false, message: 'Fatura não encontrada.' }
-  } catch {
-    return { ok: false, message: 'Erro ao buscar fatura.' }
-  }
-}
-
-// Busca todas as faturas (para administração)
-export const getTodasFaturas = async () => {
-  try {
-    const querySnapshot = await getDocs(collection(db, 'faturas'))
-    const faturas = []
-    querySnapshot.forEach((docSnap) => {
-      faturas.push({ id: docSnap.id, ...docSnap.data() })
-    })
-    return { ok: true, data: faturas }
-  } catch {
-    return { ok: false, message: 'Erro ao buscar faturas.' }
-  }
-}
-
-// Busca faturas por status (para administração)
-export const getFaturasPorStatus = async (status) => {
-  try {
-    const q = query(collection(db, 'faturas'), where('status', '==', status))
-    const querySnapshot = await getDocs(q)
-    const faturas = []
-    querySnapshot.forEach((docSnap) => {
-      faturas.push({ id: docSnap.id, ...docSnap.data() })
-    })
-    return { ok: true, data: faturas }
-  } catch {
-    return { ok: false, message: 'Erro ao buscar faturas.' }
   }
 }
 
@@ -231,50 +175,7 @@ export const criarRevisaoFatura = async (dados) => {
   }
 }
 
-// Busca revisões pendentes
-export const getRevisoesPendentes = async () => {
-  try {
-    const q = query(collection(db, 'revisoesFaturas'), where('status', '==', 'pendente'))
-    const querySnapshot = await getDocs(q)
-    const revisoes = []
-    querySnapshot.forEach((docSnap) => {
-      revisoes.push({ id: docSnap.id, ...docSnap.data() })
-    })
-    return { ok: true, data: revisoes }
-  } catch {
-    return { ok: false, message: 'Erro ao buscar revisões.' }
-  }
-}
-
-// Atualiza uma revisão
-export const atualizarRevisao = async (revisaoId, dados) => {
-  try {
-    await updateDoc(doc(db, 'revisoesFaturas', revisaoId), {
-      ...dados,
-      resolvidoEm: new Date().toISOString(),
-    })
-    return { ok: true }
-  } catch {
-    return { ok: false, message: 'Erro ao atualizar revisão.' }
-  }
-}
-
 // ==================== UNIDADES CONSUMIDORAS ====================
-
-// Busca unidades do cliente autenticado
-export const getUnidadesDoCliente = async (uid) => {
-  try {
-    const q = query(collection(db, 'unidades'), where('clienteId', '==', uid))
-    const querySnapshot = await getDocs(q)
-    const unidades = []
-    querySnapshot.forEach((docSnap) => {
-      unidades.push({ id: docSnap.id, ...docSnap.data() })
-    })
-    return { ok: true, data: unidades }
-  } catch {
-    return { ok: false, message: 'Erro ao buscar unidades consumidoras.' }
-  }
-}
 
 // Observa unidades do cliente em tempo real
 export const observarUnidadesDoCliente = (uid, callback) => {
@@ -296,18 +197,65 @@ export const observarUnidadesDoCliente = (uid, callback) => {
 
 // ==================== ATENDIMENTO ====================
 
-// Busca chamados do cliente autenticado
-export const getChamadosDoCliente = async (uid) => {
+// Observa os chamados do cliente autenticado em tempo real. O status muda
+// quando o administrador atende — o cliente vê a atualização sem recarregar.
+export const observarChamadosDoCliente = (uid, callback) =>
+  onSnapshot(
+    query(collection(db, 'atendimento'), where('clienteId', '==', uid)),
+    (snapshot) => {
+      const chamados = []
+      snapshot.forEach((docSnap) => {
+        chamados.push({ id: docSnap.id, ...docSnap.data() })
+      })
+      callback({ ok: true, data: chamados })
+    },
+    (error) => {
+      callback({
+        ok: false,
+        data: [],
+        codigo: error?.code || 'firestore/erro',
+        message: 'Não foi possível carregar seus chamados.',
+      })
+    },
+  )
+
+// Observa TODOS os chamados (painel administrativo). A leitura é autorizada
+// pelo `isAdmin()` das Security Rules — sem isso os pedidos dos clientes
+// ficavam gravados no banco e invisíveis para a equipe.
+export const observarTodosChamados = (callback) =>
+  onSnapshot(
+    query(collection(db, 'atendimento'), limit(LIMITE_CHAMADOS)),
+    (snapshot) => {
+      const chamados = []
+      snapshot.forEach((docSnap) => {
+        chamados.push({ id: docSnap.id, ...docSnap.data() })
+      })
+      callback({ ok: true, data: chamados })
+    },
+    (error) => {
+      callback({
+        ok: false,
+        data: [],
+        codigo: error?.code || 'firestore/erro',
+        message: 'Não foi possível carregar as solicitações de atendimento.',
+      })
+    },
+  )
+
+// Atualiza um chamado (usado pelo administrador para responder/mudar o status)
+export const atualizarChamado = async (chamadoId, dados) => {
   try {
-    const q = query(collection(db, 'atendimento'), where('clienteId', '==', uid))
-    const querySnapshot = await getDocs(q)
-    const chamados = []
-    querySnapshot.forEach((docSnap) => {
-      chamados.push({ id: docSnap.id, ...docSnap.data() })
+    await updateDoc(doc(db, 'atendimento', chamadoId), {
+      ...dados,
+      atualizadoEm: new Date().toISOString(),
     })
-    return { ok: true, data: chamados }
-  } catch {
-    return { ok: false, message: 'Erro ao buscar chamados.' }
+    return { ok: true }
+  } catch (error) {
+    return {
+      ok: false,
+      codigo: error?.code || 'firestore/erro',
+      message: 'Não foi possível atualizar a solicitação.',
+    }
   }
 }
 
@@ -335,10 +283,13 @@ export const criarChamado = async (uid, dados) => {
 // Requer sessão autenticada: as regras de segurança autorizam o próprio cliente
 // (uid) e o administrador (token admin OU e-mail na lista de administradores).
 
-// Lista todos os documentos de uma coleção
-export const listarDocumentos = async (colecao) => {
+// Lista os documentos de uma coleção.
+// `limite` é usado pelas coleções que crescem continuamente (`logs`) — sem ele
+// cada leitura trazia o histórico INTEIRO para a memória do navegador.
+export const listarDocumentos = async (colecao, { limite } = {}) => {
   try {
-    const snapshot = await getDocs(collection(db, colecao))
+    const referencia = collection(db, colecao)
+    const snapshot = await getDocs(limite ? query(referencia, limit(limite)) : referencia)
     const documentos = []
     snapshot.forEach((docSnap) => {
       documentos.push({ id: docSnap.id, ...docSnap.data() })
@@ -357,7 +308,9 @@ export const listarDocumentos = async (colecao) => {
 // Grava (cria ou atualiza) um documento. `merge` preserva campos não enviados.
 export const salvarDocumento = async (colecao, id, dados, { merge = true } = {}) => {
   try {
-    await setDoc(doc(db, colecao, String(id)), dados, { merge })
+    const limpeza = camposSensiveis(colecao)
+    const payload = limpeza ? { ...itemParaBanco(colecao, dados), ...limpeza } : dados
+    await setDoc(doc(db, colecao, String(id)), payload, { merge })
     return { ok: true }
   } catch (error) {
     return {
@@ -383,7 +336,9 @@ export const removerDocumento = async (colecao, id) => {
 }
 
 // Grava uma coleção inteira (espelhamento do cache local para o Firestore).
-// O id de cada documento é resolvido por `idDocumento` (clientes usam o UID).
+// O id de cada documento é resolvido por `idDocumento` (clientes usam o UID);
+// credenciais são removidas/limpas dentro de `salvarDocumento` (itemParaBanco +
+// deleteField para senhas legadas já gravadas).
 export const sincronizarColecaoRemota = async (colecao, itens = []) => {
   const resultados = await Promise.allSettled(
     itens.map((item) => salvarDocumento(colecao, idDocumento(colecao, item), item)),
@@ -401,18 +356,6 @@ export const sincronizarColecaoRemota = async (colecao, itens = []) => {
   })
 
   return { ok: falhas.length === 0, gravados: itens.length - falhas.length, falhas }
-}
-
-// ==================== UTILITÁRIOS ====================
-
-// Verifica se o Firestore está acessível (conexão)
-export const verificarConexao = async () => {
-  try {
-    await getDocs(query(collection(db, 'clientes'), where('__teste', '==', true)))
-    return true
-  } catch {
-    return false
-  }
 }
 
 // ==================== SINCRONIZAÇÃO EM TEMPO REAL ====================
@@ -443,14 +386,16 @@ export const dedupeFaturas = (faturas = []) => {
 }
 
 /**
- * Observa uma coleção inteira em tempo real.
+ * Observa uma coleção em tempo real.
+ * `limite` é usado pelas coleções que crescem continuamente (`logs`).
  * @param {string} colecao
  * @param {(resultado:{ok:boolean, data?:Array, codigo?:string, message?:string}) => void} callback
+ * @param {{limite?:number}} [opcoes]
  * @returns {() => void} unsubscribe
  */
-export const observarColecao = (colecao, callback) =>
+export const observarColecao = (colecao, callback, { limite } = {}) =>
   onSnapshot(
-    collection(db, colecao),
+    limite ? query(collection(db, colecao), limit(limite)) : collection(db, colecao),
     (snapshot) => {
       const documentos = []
       snapshot.forEach((docSnap) => {
