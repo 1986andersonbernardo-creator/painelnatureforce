@@ -76,8 +76,8 @@ SDK Web). As variáveis abaixo permitem mudar sem editar código:
 
 ```bash
 VITE_FIREBASE_API_KEY=...       # demais chaves: AUTH_DOMAIN, PROJECT_ID, etc.
-VITE_ADMIN_EMAILS=admin@natureforce.com,outro@empresa.com   # allowlist de admin
-VITE_ADMIN_EMAIL=admin@natureforce.com                      # conta de bootstrap
+VITE_ADMIN_EMAILS=guladpizza@gmail.com,1986.andersonbernardo@gmail.com   # allowlist de admin
+VITE_ADMIN_EMAIL=guladpizza@gmail.com                      # conta de bootstrap
 VITE_ADMIN_PASSWORD=...         # senha do bootstrap offline (troque em produção)
 ```
 

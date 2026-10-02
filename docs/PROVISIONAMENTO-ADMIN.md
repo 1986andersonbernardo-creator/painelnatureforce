@@ -21,7 +21,7 @@ dados no cache local do navegador.
 
 2. **Criar a conta do administrador**
    - **Authentication → Users → Add user**
-   - E-mail: o MESMO e-mail usado em `/admin/login` (padrão: `admin@natureforce.com`)
+   - E-mail: o MESMO e-mail usado em `/admin/login` (padrão: `guladpizza@gmail.com`)
    - Senha: a MESMA senha usada no login do sistema
    - IMPORTANTE: se a conta já existir com outro e-mail, use o e-mail que está
      na lista de `firestore.rules` (função `isAdmin()`), ou atualize a lista.
@@ -43,19 +43,27 @@ As Security Rules aceitam duas formas de autorização:
 1. E-mail na lista `isAdmin()` em `firestore.rules` (já suficiente);
 2. Custom claim `admin: true` (recomendado: sobrevive a mudanças de e-mail).
 
-Para definir o claim, use o SDK Admin (servidor/CLI, nunca o frontend):
+Para definir o claim, use o SDK Admin (servidor/CLI, nunca o frontend). O projeto
+já traz um script pronto:
 
 ```bash
-npm i -D firebase-admin
-# salve a chave de serviço (Console → Configurações do projeto → Contas de serviço)
-GOOGLE_APPLICATION_CREDENTIALS=./serviceAccountKey.json node -e "
-const admin = require('firebase-admin');
-admin.initializeApp();
-admin.auth().setCustomUserClaims('<UID_DO_ADMIN>', { admin: true })
-  .then(() => console.log('claim admin definido'))
-  .finally(() => process.exit());
-"
+# 1. salve a chave de serviço como serviceAccountKey.json na raiz do projeto
+#    (Console → Configurações do projeto → Contas de serviço → Gerar nova chave privada)
+# 2. defina a claim nos UIDs administrativos
+npm run set-admin                       # usa os UIDs padrão do projeto
+npm run set-admin -- UID1 UID2 UID3     # ou informe os UIDs
+npm run set-admin -- --remove UID1      # remove a claim de um UID
 ```
+
+O script `scripts/set-admin-claim.cjs`:
+- valida que a conta existe no Firebase Auth (mostra o e-mail correspondente);
+- define `{ admin: true }` em cada UID;
+- lê a claim DE VOLTA para confirmar (prova de que funcionou).
+
+> Depois de aplicar a claim, o usuário precisa **sair e entrar novamente** para
+> o novo token valer (o token já emitido mantém as claims antigas até expirar).
+> Se o e-mail também estiver na lista `isAdmin()` das Rules, a autorização vale
+> de imediato, sem troca de token.
 
 ## Segurança
 

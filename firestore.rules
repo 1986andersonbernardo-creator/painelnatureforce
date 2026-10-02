@@ -22,7 +22,10 @@ service cloud.firestore {
     function isAdmin() {
       return request.auth != null &&
              (request.auth.token.admin == true ||
-              request.auth.token.email in ['admin@natureforce.com']);
+              request.auth.token.email in [
+                'guladpizza@gmail.com',
+                '1986.andersonbernardo@gmail.com'
+              ]);
     }
 
     // Helper: é o dono (UID == clienteId)?

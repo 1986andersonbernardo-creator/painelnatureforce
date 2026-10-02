@@ -154,7 +154,7 @@ export function LoginAdmin() {
   const { loginAdmin } = useAuth()
   const navigate = useNavigate()
   const [form, setForm] = useState({
-    email: 'admin@natureforce.com',
+    email: 'guladpizza@gmail.com',
     password: '',
   })
   const [error, setError] = useState('')
@@ -195,7 +195,7 @@ export function LoginAdmin() {
             onChange={(event) =>
               setForm((current) => ({ ...current, email: event.target.value }))
             }
-            placeholder="admin@natureforce.com"
+            placeholder="guladpizza@gmail.com"
           />
         </label>
 
