@@ -10,27 +10,39 @@
  */
 export const normalizarReferencia = (referencia) => {
   if (!referencia) return ''
+  const texto = String(referencia).trim()
 
   // Formato: "AGO/2026"
   const meses = {
     JAN: '01', FEV: '02', MAR: '03', ABR: '04', MAI: '05', JUN: '06',
     JUL: '07', AGO: '08', SET: '09', OUT: '10', NOV: '11', DEZ: '12',
   }
-  const matchMesAno = referencia.match(/([A-Z]{3})\/(\d{4})/i)
+  const matchMesAno = texto.match(/^([A-Z]{3})\/(\d{4})$/i)
   if (matchMesAno) {
     const mes = meses[matchMesAno[1].toUpperCase()]
-    if (mes) return `${matchMesAno[2]}-${mes}`
+    if (mes && Number(matchMesAno[2]) > 0) return `${matchMesAno[2]}-${mes}`
   }
 
   // Formato: "08/2026"
-  const matchNum = referencia.match(/(\d{2})\/(\d{4})/)
-  if (matchNum) return `${matchNum[2]}-${matchNum[1]}`
+  const matchNum = texto.match(/^(\d{2})\/(\d{4})$/)
+  if (matchNum && Number(matchNum[1]) >= 1 && Number(matchNum[1]) <= 12 && Number(matchNum[2]) > 0) {
+    return `${matchNum[2]}-${matchNum[1]}`
+  }
 
   // Formato: "2026-08"
-  const matchISO = referencia.match(/(\d{4})-(\d{2})/)
-  if (matchISO) return `${matchISO[1]}-${matchISO[2]}`
+  const matchISO = texto.match(/^(\d{4})-(\d{2})$/)
+  if (matchISO && Number(matchISO[1]) > 0 && Number(matchISO[2]) >= 1 && Number(matchISO[2]) <= 12) {
+    return `${matchISO[1]}-${matchISO[2]}`
+  }
 
-  return referencia
+  return texto
+}
+
+const dataValida = (ano, mes, dia) => {
+  if (ano < 1 || mes < 1 || mes > 12 || dia < 1) return false
+  const bissexto = ano % 4 === 0 && (ano % 100 !== 0 || ano % 400 === 0)
+  const diasNoMes = [31, bissexto ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+  return dia <= diasNoMes[mes - 1]
 }
 
 /**
@@ -40,7 +52,26 @@ export const normalizarReferencia = (referencia) => {
  */
 export const normalizarVencimento = (vencimento) => {
   if (!vencimento) return ''
-  const match = vencimento.match(/(\d{2})\/(\d{2})\/(\d{4})/)
-  if (match) return `${match[3]}-${match[2]}-${match[1]}`
-  return vencimento
+  const texto = String(vencimento).trim()
+  const matchBR = texto.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)
+  if (matchBR) {
+    const [, dia, mes, ano] = matchBR
+    if (dataValida(Number(ano), Number(mes), Number(dia))) return `${ano}-${mes}-${dia}`
+    return texto
+  }
+
+  const matchISO = texto.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (matchISO && dataValida(Number(matchISO[1]), Number(matchISO[2]), Number(matchISO[3]))) {
+    return texto
+  }
+
+  return texto
+}
+
+export const vencimentoValido = (vencimento) => {
+  const normalizado = normalizarVencimento(vencimento)
+  const match = normalizado.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  return Boolean(
+    match && dataValida(Number(match[1]), Number(match[2]), Number(match[3])),
+  )
 }

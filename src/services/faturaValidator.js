@@ -1,6 +1,12 @@
 // ==================== Validador de Fatura ====================
 // Valida a integridade dos dados extraídos e do cálculo realizado.
 
+import {
+  normalizarReferencia,
+  normalizarVencimento,
+  vencimentoValido,
+} from './faturaNormalizacao.js'
+
 /**
  * Valida se os dados extraídos da fatura são consistentes.
  * @param {Object} componentes - Componentes classificados
@@ -13,8 +19,22 @@ export const validarFatura = (componentes, calculo) => {
   // ===== Validação de identificação =====
   if (!componentes.uc) erros.push('UC não identificada')
   if (!componentes.cliente) erros.push('Cliente não identificado')
-  if (!componentes.referencia) erros.push('Mês de referência não identificado')
-  if (!componentes.vencimento) erros.push('Vencimento não identificado')
+  const referenciaNormalizada = normalizarReferencia(componentes.referencia)
+  if (!componentes.referencia) {
+    erros.push('Mês de referência não identificado')
+  } else if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(referenciaNormalizada)) {
+    erros.push('Mês de referência inválido')
+  }
+
+  const vencimentoNormalizado = normalizarVencimento(componentes.vencimento)
+  if (!componentes.vencimento) {
+    erros.push('Vencimento não identificado')
+  } else if (
+    !/^\d{4}-\d{2}-\d{2}$/.test(vencimentoNormalizado) ||
+    !vencimentoValido(componentes.vencimento)
+  ) {
+    erros.push('Vencimento inválido')
+  }
   if (!componentes.consumo) erros.push('Consumo (kWh) não identificado')
 
   // ===== Validação de componentes =====

@@ -16,6 +16,7 @@ import {
   encontrarDuplicadaPorIdempotencia,
 } from '../src/services/faturaDedup.js'
 import { calcularDesconto } from '../src/services/descontoCalculator.js'
+import { validarFatura } from '../src/services/faturaValidator.js'
 import {
   reconstruirLinhas,
   reconstruirTextoDePaginas,
@@ -32,7 +33,11 @@ import {
   validarArquivoPDF,
 } from '../src/services/pdfValidacao.js'
 // Módulo puro separado (sem pdf.js) — normalização de campos extraídos.
-import { normalizarReferencia, normalizarVencimento } from '../src/services/faturaNormalizacao.js'
+import {
+  normalizarReferencia,
+  normalizarVencimento,
+  vencimentoValido,
+} from '../src/services/faturaNormalizacao.js'
 
 // ==================== Cenário-base ====================
 const clientes = [
@@ -318,11 +323,15 @@ test('17. Fatura completa: UC, cliente, referência, vencimento e consumo', () =
   assert.equal(c.referencia, '08/2026')
   assert.equal(c.vencimento, '18/09/2026')
   assert.equal(c.consumo, 188.75)
-  assert.equal(c.energia, 188.75)
+  assert.equal(c.energia, null, 'Energia Ativa é consumo em kWh, não valor monetário')
   assert.equal(c.tusd, 135.99)
   assert.equal(c.te, 66.99)
   assert.equal(c.icms, 48.37)
   assert.equal(c.confiancas.uc, 'CONFIRMADO')
+
+  const calculo = calcularDesconto(c)
+  assert.equal(calculo.valorElegivel, 202.98, 'somente os valores monetários TUSD e TE são somados')
+  assert.equal(calculo.valorDesconto, 40.6)
 
   // A UC extraída resolve o cliente cadastrado (pipeline completo)
   const decisao = identificarFatura({
@@ -503,8 +512,29 @@ test('23. Referência e vencimento extraídos são normalizados nos formatos usa
   assert.equal(normalizarVencimento(''), '')
   assert.equal(normalizarVencimento(null), '')
 
+  // Valores fora dos intervalos calendáricos não são normalizados para datas válidas.
+  assert.equal(normalizarReferencia('13/2026'), '13/2026')
+  assert.equal(normalizarReferencia('2026-13'), '2026-13')
+  assert.equal(normalizarVencimento('31/09/2026'), '31/09/2026')
+  assert.equal(normalizarVencimento('29/02/2025'), '29/02/2025')
+  assert.equal(normalizarVencimento('29/02/2024'), '2024-02-29')
+  assert.equal(vencimentoValido('2026-02-30'), false)
+  assert.equal(vencimentoValido('2024-02-29'), true)
+
   // Formato não reconhecido devolve o valor original (nunca inventa data)
   assert.equal(normalizarReferencia('sem-data'), 'sem-data')
   assert.equal(normalizarVencimento('data desconhecida'), 'data desconhecida')
 })
 
+test('Datas impossíveis em faturas são rejeitadas pela validação', () => {
+  const componentes = classificarFatura(reconstruirTextoDePaginas([paginaFatura]))
+  componentes.referencia = '13/2026'
+
+  for (const vencimento of ['31/99/2026', '2026-02-30']) {
+    componentes.vencimento = vencimento
+    const resultado = validarFatura(componentes, calcularDesconto(componentes))
+    assert.equal(resultado.valido, false)
+    assert.ok(resultado.erros.includes('Mês de referência inválido'))
+    assert.ok(resultado.erros.includes('Vencimento inválido'))
+  }
+})

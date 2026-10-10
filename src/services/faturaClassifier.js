@@ -324,11 +324,8 @@ export const classificarFatura = (texto) => {
 
     // ===== Componentes de energia (elegíveis) =====
 
-    // Energia Ativa (medidor): "Energia Ativa Único 16.602,00 16.925,00 1,00000 188,75"
-    if (!componentes.energia) {
-      const m = l.match(/Energia Ativa\s+[A-ZÀ-Úa-zà-ú]+\s+[0-9.,]+\s+[0-9.,]+\s+[0-9.,]+\s+([0-9.,]+)/i)
-      if (m) componentes.energia = paraNumero(m[1])
-    }
+    // "Energia Ativa" é uma leitura de consumo em kWh, não um valor monetário.
+    // O consumo já é extraído acima; não o somar à parcela elegível do desconto.
 
     // Energia (padrão geral)
     if (!componentes.energia) {
