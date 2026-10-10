@@ -296,11 +296,28 @@ export const listarDocumentos = async (colecao, { limite } = {}) => {
     })
     return { ok: true, data: documentos }
   } catch (error) {
+    const codigo = error?.code || 'firestore/erro'
+    const orientacoes = {
+      'permission-denied':
+        `Acesso negado à coleção "${colecao}". Confira se as regras do Firestore foram publicadas e se a conta está autorizada como administradora.`,
+      unauthenticated:
+        'A sessão do Firebase expirou ou não está autenticada. Saia do painel e entre novamente.',
+      'auth/network-request-failed':
+        'Não foi possível conectar ao Firebase Authentication. Confira a conexão e tente entrar novamente.',
+      unavailable:
+        'O Firestore está indisponível no momento. Confira sua conexão com a internet e tente novamente.',
+      'deadline-exceeded':
+        'A leitura do Firestore excedeu o tempo limite. Confira sua conexão e tente novamente.',
+      'failed-precondition':
+        `O Firestore recusou a leitura da coleção "${colecao}" por uma pré-condição não atendida. Confira a configuração do banco e as regras publicadas.`,
+    }
     return {
       ok: false,
       data: [],
-      codigo: error?.code || 'firestore/erro',
-      message: 'Não foi possível ler os dados compartilhados.',
+      codigo,
+      message:
+        orientacoes[codigo] ||
+        `Não foi possível ler a coleção "${colecao}" no banco compartilhado (código: ${codigo}).`,
     }
   }
 }
