@@ -1,9 +1,8 @@
 // ==================== Deduplicação de Faturas ====================
-// Impede que a mesma fatura seja cadastrada duas vezes.
+// Detecta reenvios do mesmo PDF; arquivos diferentes para a mesma competência
+// são tratados como versões distintas, com o histórico preservado.
 //
-// Estratégia de identificação (em ordem de prioridade):
-//   1. Hash SHA-256 do conteúdo do arquivo (mesmo arquivo renomeado = duplicada)
-//   2. Chave lógica: UC + competência + número da nota fiscal
+// A identificação exata usa o hash SHA-256 do conteúdo do arquivo.
 //
 // A verificação é feita ANTES da persistência e a chave fica armazenada
 // na própria fatura (hashArquivo / chaveDedupe) para consultas futuras.
@@ -60,27 +59,21 @@ export const gerarChaveDedupe = ({ uc, referencia, numeroNota }) => {
 export const encontrarFaturaDuplicada = (faturasExistentes, { hashArquivo, chaveDedupe }) => {
   if (!Array.isArray(faturasExistentes)) return null
 
-  // 1. Mesmo conteúdo de arquivo (mais forte)
   if (hashArquivo) {
     const porHash = faturasExistentes.find((f) => f.hashArquivo === hashArquivo)
     if (porHash) return porHash
   }
 
-  // 2. Mesma UC + competência + nota (lógica)
-  if (chaveDedupe && chaveDedupe !== '-|-|-') {
-    const porChave = faturasExistentes.find(
-      (f) => f.chaveDedupe === chaveDedupe && f.status !== 'erro',
-    )
-    if (porChave) return porChave
-  }
-
+  // A chave lógica continua armazenada para consultar versões e dados legados,
+  // mas não pode bloquear um PDF diferente da mesma UC/competência.
+  void chaveDedupe
   return null
 }
 
 // ==================== Idempotência forte ====================
 // A chave de idempotência combina a chave lógica (UC|referencia|nota) com o hash
-// do arquivo. A mesma fatura (mesmo arquivo renomeado OU mesmo mês/UC/nota) nunca
-// é cadastrada duas vezes. Essa chave é persistida na própria fatura e gera um ID
+// do arquivo. O mesmo PDF não é cadastrado duas vezes. Essa chave é persistida
+// na própria fatura e gera um ID
 // determinístico no Firestore (impede duplicação mesmo em concorrência/reatribuição).
 
 /**

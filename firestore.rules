@@ -1,185 +1,136 @@
 rules_version = '2';
 
-// ==================== REGRAS DE SEGURANÇA — NATURE FORCE ====================
-// Princípio: cada cliente só acessa seus próprios dados (cliente A NUNCA vê cliente B).
-// O UID do Firebase Authentication é o identificador principal.
-// Administradores têm acesso amplo para gestão (custom claim `admin: true` ou
-// e-mail operacional); apenas o master pode criar/remover perfis administrativos.
-//
-// Modelo em 3 níveis: clientes → unidades (UC) → faturas.
-// - A UC é o principal identificador de uma fatura.
-// - Um cliente só visualiza UCs/faturas cujo clienteId == seu uid.
-
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
 
-    // Administrador master: identidade fixa verificada pelo token assinado do Auth.
     function isMasterAdmin() {
-      return request.auth != null &&
-             request.auth.token.get('email', '') == 'thyagopatriota2020@gmail.com';
+      return signedIn() &&
+        request.auth.token.get('email', '') == 'thyagopatriota2020@gmail.com';
     }
 
-    // Helper: é um usuário autenticado administrador?
-    // Suporta as duas formas de autorização:
-    //   1. custom claim `admin: true` (recomendado em produção);
-    //   2. e-mail presente na lista de administradores abaixo.
-    // A lista deve conter os e-mails usados em /admin/login — caso contrário o
-    // administrador fica sem permissão de escrita e as alterações não persistem.
+    function adminNotDeactivated() {
+      return request.auth.token.get('email', '') == '' ||
+        !exists(/databases/$(database)/documents/usuarios/$(request.auth.token.email)) ||
+        get(/databases/$(database)/documents/usuarios/$(request.auth.token.email))
+          .data.get('status', 'ativo') != 'inativo';
+    }
+
     function isAdmin() {
-      return request.auth != null &&
-             (isMasterAdmin() ||
-              request.auth.token.get('admin', false) == true ||
-              request.auth.token.get('email', '') in [
-                'guladpizza@gmail.com',
-                '1986.andersonbernardo@gmail.com'
-              ]);
+      return signedIn() &&
+        (isMasterAdmin() ||
+         ((request.auth.token.get('role', '') == 'admin' ||
+           request.auth.token.get('admin', false) == true ||
+           request.auth.token.get('email', '') in [
+             'guladpizza@gmail.com',
+             '1986.andersonbernardo@gmail.com'
+           ]) && adminNotDeactivated()));
     }
 
-    // Helper: é o dono (UID == clienteId)?
     function isOwner(clienteId) {
-      return request.auth != null && request.auth.uid == clienteId;
+      return signedIn() && request.auth.uid == clienteId;
     }
 
-    // ==================== CLIENTES ====================
-    // O documento é identificado pelo UID do usuário autenticado.
-    // O cliente só pode ler/alterar o próprio documento.
-    // O ADMINISTRADOR também pode alterar/criar o cadastro do cliente — sem
-    // isso, toda alteração feita na Área Administrativa era negada pelo banco
-    // e o dado antigo reaparecia após recarregar a página.
+    function validOwnProfileUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'nome',
+        'telefone',
+        'email',
+        'endereco',
+        'cidade',
+        'estado',
+        'cep',
+        'whatsapp',
+        'atualizadoEm',
+        'atualizadoEmMs'
+      ]);
+    }
+
     match /clientes/{clienteId} {
       allow read: if isOwner(clienteId) || isAdmin();
-
-      // Criação: o próprio cliente cria o SEU documento (id = UID) ou o admin
-      // cria o cadastro. A checagem antiga exigia `request.resource.data.email`
-      // igual ao e-mail do token, mas o cadastro guarda o e-mail de CONTATO
-      // (o e-mail de login fica em `emailAcesso`) — a gravação era negada sem
-      // o usuário entender o motivo. `isOwner(clienteId)` já impede que alguém
-      // crie/altere o documento de outra pessoa (o id do documento é o UID).
-      allow create: if isOwner(clienteId) || isAdmin();
-
-      allow update: if isOwner(clienteId) || isAdmin();
-
-      // Exclusão: SOMENTE o administrador. Antes era `false` para todos e o
-      // botão "Remover cliente" do painel falhava em silêncio (o Firestore
-      // negava o delete e o cadastro reaparecia na sincronização seguinte).
-      allow delete: if isAdmin();
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() ||
+        (isOwner(clienteId) && validOwnProfileUpdate());
     }
 
-    // ==================== UNIDADES CONSUMIDORAS (UC) ====================
-    // O cliente só acessa UCs onde clienteId == seu UID (histórico por UC isolado).
     match /unidades/{unidadeId} {
       allow read: if isOwner(resource.data.clienteId) || isAdmin();
-
-      allow create: if isOwner(request.resource.data.clienteId) || isAdmin();
-
-      allow update: if isAdmin() ||
-                    (isOwner(resource.data.clienteId) &&
-                     request.resource.data.clienteId == resource.data.clienteId);
-
-      allow delete: if isAdmin();
+      allow create, update, delete: if isAdmin();
     }
 
-    // ==================== FATURAS ====================
-    // O cliente só acessa faturas onde clienteId == seu UID.
-    // Nunca permitir que Cliente A visualize fatura do Cliente B.
-    // Admin pode gerir todas. A criação via admin vincula a fatura ao clienteId correto.
     match /faturas/{faturaId} {
-      allow read: if isOwner(resource.data.clienteId) || isAdmin();
-
-      allow create: if isOwner(request.resource.data.clienteId) || isAdmin();
-
-      allow update: if isAdmin() ||
-                    (isOwner(resource.data.clienteId) &&
-                     request.resource.data.clienteId == resource.data.clienteId);
-
-      allow delete: if isAdmin();
+      allow read: if isAdmin() ||
+        (resource.data.status == 'disponivel' &&
+         isOwner(resource.data.clienteId));
+      allow create: if isAdmin() &&
+        request.resource.data.status != 'disponivel';
+      allow update: if isAdmin() &&
+        ((resource.data.status != 'disponivel' &&
+          request.resource.data.status != 'disponivel') ||
+         (resource.data.status == 'disponivel' &&
+          request.resource.data.status == 'disponivel' &&
+          request.resource.data.clienteId == resource.data.clienteId &&
+          request.resource.data.uc == resource.data.uc &&
+          request.resource.data.storagePath == resource.data.storagePath &&
+          request.resource.data.versao == resource.data.versao &&
+          request.resource.data.versaoAtual == resource.data.versaoAtual));
+      allow delete: if false;
     }
 
-    // ==================== PROCESSAMENTO DE FATURAS ====================
-    // Apenas administradores podem ler/gerenciar processamentos.
     match /processamentoFaturas/{processamentoId} {
       allow read, write: if isAdmin();
     }
 
-    // ==================== REVISÕES DE FATURAS ====================
-    // Apenas administradores podem ler/gerenciar revisões (inclusive REVISAO_MANUAL).
     match /revisoesFaturas/{revisaoId} {
       allow read, write: if isAdmin();
     }
 
-    // ==================== PRÉ-CADASTROS (auto-cadastro por fatura) ====================
-    // Pré-cadastros criados automaticamente pelo pipeline de importação de PDF.
-    // Somente administradores podem ler/gerenciar. Clientes confirmados migram
-    // para a coleção 'clientes' e o pré-cadastro é removido.
     match /preCadastros/{preCadastroId} {
       allow read, write: if isAdmin();
     }
 
-    // ==================== ATENDIMENTO ====================
     match /atendimento/{chamadoId} {
       allow read: if isOwner(resource.data.clienteId) || isAdmin();
-
       allow create: if isOwner(request.resource.data.clienteId);
-
-      allow update: if isAdmin() ||
-                    (isOwner(resource.data.clienteId) &&
-                     request.resource.data.clienteId == resource.data.clienteId);
-
+      allow update: if isAdmin();
       allow delete: if false;
     }
 
-    // ==================== PAGAMENTOS ====================
     match /pagamentos/{pagamentoId} {
       allow read: if isOwner(resource.data.clienteId) || isAdmin();
-
-      allow create: if isOwner(request.resource.data.clienteId);
-
-      allow update: if isAdmin() ||
-                    (isOwner(resource.data.clienteId) &&
-                     request.resource.data.clienteId == resource.data.clienteId);
-
-      allow delete: if false;
+      allow create, update, delete: if isAdmin();
     }
 
-    // ==================== CONSUMO ====================
     match /consumo/{registroId} {
       allow read: if isOwner(resource.data.clienteId) || isAdmin();
-
-      allow create: if isOwner(request.resource.data.clienteId);
-
-      allow update: if isAdmin() ||
-                    (isOwner(resource.data.clienteId) &&
-                     request.resource.data.clienteId == resource.data.clienteId);
-
-      allow delete: if false;
+      allow create, update, delete: if isAdmin();
     }
 
-    // ==================== USUÁRIOS ADMINISTRATIVOS ====================
-    // Coleção gerenciada pelo painel administrativo (tela de Usuários).
-    // A SENHA nunca é gravada aqui (credenciais vivem no Firebase Auth) —
-    // ver usuarioParaBanco() em services/persistencia.js.
-    // Todos os administradores leem a lista; apenas o master pode criar/remover
-    // perfis. Administradores operacionais só podem atualizar seus próprios
-    // metadados sem trocar e-mail ou perfil.
+    // Administrative identities and authorization are provisioned by trusted
+    // server code. No client, including an admin, may edit these documents.
     match /usuarios/{usuarioId} {
       allow read: if isAdmin();
-      allow create, delete: if isMasterAdmin();
-      allow update: if isMasterAdmin() ||
-                    (isAdmin() &&
-                     resource.data.email == request.auth.token.get('email', '') &&
-                     request.resource.data.email == resource.data.email &&
-                     request.resource.data.perfil == resource.data.perfil);
+      allow write: if false;
     }
 
-    // ==================== LOGS DE AUDITORIA ====================
-    // Histórico de ações compartilhado entre dispositivos.
-    // Somente administradores (os logs são gravados pelo painel autenticado).
+    // Records are written by server-side audit handlers only.
     match /logs/{logId} {
-      allow read, write: if isAdmin();
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
-    // ==================== NEGAÇÃO PADRÃO ====================
-    // Qualquer outra coleção/documento é negado por padrão.
+    match /auditoria/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // Server-managed serialization keys prevent concurrent invoice duplicates.
+    match /chavesFatura/{chaveId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

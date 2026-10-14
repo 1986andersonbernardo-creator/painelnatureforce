@@ -14,16 +14,17 @@
 import { hashDeterministico, normalizarUC } from './faturaDedup.js'
 
 // Coleções que participam da sincronização local ↔ Firestore (banco central).
-// `usuarios` e `logs` também sincronizam: a tela de Usuários e o histórico de
-// auditoria precisam ser iguais em todos os dispositivos. A SENHA nunca vai
-// para o banco (ver usuarioParaBanco) — credenciais vivem no Firebase Auth.
+// Perfis administrativos são apenas leitura no cliente; operações e logs
+// administrativos são gravados pelas Functions confiáveis.
 export const COLECOES_SINCRONIZADAS = Object.freeze([
   'clientes',
   'unidades',
   'faturas',
   'preCadastros',
+])
+
+export const COLECOES_CENTRAIS_SOMENTE_LEITURA = Object.freeze([
   'usuarios',
-  'logs',
 ])
 
 // ==================== Identidade ====================
@@ -113,16 +114,14 @@ export const idDocumento = (colecao, item) => {
 }
 
 /**
- * Payload de um usuário para o banco central — NUNCA inclui a senha.
- * As credenciais vivem no Firebase Authentication; o campo `senha` existe
- * apenas para o login administrativo offline/bootstrap e não deve vazar para
- * o banco compartilhado.
+ * Payload de usuário — remove campos legados de credenciais locais.
+ * A autenticação ocorre exclusivamente no Firebase Authentication.
  * @param {Object} usuario
- * @returns {Object} Registro sem `senha`
+ * @returns {Object} Registro sem campos de senha
  */
 export const usuarioParaBanco = (usuario) => {
   if (!usuario || typeof usuario !== 'object') return usuario
-  const { senha: _senha, ...resto } = usuario
+  const { senha: _senha, senhaAcesso: _senhaAcesso, ...resto } = usuario
   return resto
 }
 
@@ -517,7 +516,15 @@ export const associarUCaCliente = ({
 
   const clienteId = String(cliente.uid || cliente.id)
   const pre = preCadastros.find((p) => normalizarUC(p.uc) === ucNorm) || null
-  const existente = unidades.find((u) => normalizarUC(u.numeroUC) === ucNorm) || null
+  const correspondentes = unidades.filter((u) => normalizarUC(u.numeroUC) === ucNorm)
+  if (correspondentes.length > 1) {
+    return {
+      ...base,
+      ok: false,
+      message: `Há mais de um cadastro para a UC ${ucNorm}. Corrija a duplicidade antes de associar.`,
+    }
+  }
+  const existente = correspondentes[0] || null
   const agora = new Date()
 
   let unidade
@@ -575,8 +582,13 @@ export const associarUCaCliente = ({
       clienteIdLocal: f.clienteIdLocal ?? cliente.id,
       clienteNome: cliente.nome || f.clienteNome || null,
       ucId: f.ucId || unidade.id,
-      // Passa a ficar disponível na Área do Cliente
-      status: f.status === 'erro' ? f.status : 'disponivel',
+      // A associação cadastral não publica um arquivo que não esteja
+      // efetivamente armazenado e validado para o novo titular.
+      status: f.status === 'erro'
+        ? 'erro'
+        : f.storagePath
+          ? 'aguardando revisão'
+          : 'aguardando_pdf_compartilhado',
       pendenteVinculacao: false,
       associadaManualmente: true,
       atualizadoEm: agora.toLocaleString('pt-BR'),

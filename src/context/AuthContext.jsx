@@ -24,6 +24,11 @@ import {
   podeAdministrar,
 } from '../services/adminAccess'
 import {
+  alterarStatusAdministrador,
+  convidarAdministrador,
+  removerFaturaServidor,
+} from '../firebase/adminFunctions'
+import {
   getClientePorUid,
   salvarCliente,
   salvarFaturaIdempotente,
@@ -41,6 +46,7 @@ import { normalizarReferencia, normalizarVencimento } from '../services/faturaNo
 import { normalizarUC } from '../services/faturaDedup'
 import {
   COLECOES_SINCRONIZADAS,
+  COLECOES_CENTRAIS_SOMENTE_LEITURA,
   associarUCaCliente,
   atualizarIndiceRemoto,
   chaveUnica,
@@ -154,7 +160,11 @@ export function AuthProvider({ children }) {
    */
   const sincronizarItem = useCallback(
     (colecao, item) => {
-      if (!podeEscreverCompartilhado || !item) return
+      if (
+        !podeEscreverCompartilhado ||
+        !item ||
+        COLECOES_CENTRAIS_SOMENTE_LEITURA.includes(colecao)
+      ) return
       // `itemParaBanco` remove credenciais (senha/senhaAcesso) antes de gravar:
       // elas existem apenas no cache local deste navegador.
       const payload = itemParaBanco(colecao, item)
@@ -404,7 +414,7 @@ export function AuthProvider({ children }) {
     const falhas = []
     let falhaCritica = null
 
-    for (const colecao of COLECOES_SINCRONIZADAS) {
+    for (const colecao of [...COLECOES_SINCRONIZADAS, ...COLECOES_CENTRAIS_SOMENTE_LEITURA]) {
       const resultado = await listarDocumentos(
         colecao,
         // Coleções que crescem continuamente são lidas com limite (paginação
@@ -477,7 +487,11 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     if (!podeEscreverCompartilhado) return undefined
 
-    const desobservar = COLECOES_SINCRONIZADAS.map((colecao) =>
+    const colecoesObservadas = [
+      ...COLECOES_SINCRONIZADAS,
+      ...COLECOES_CENTRAIS_SOMENTE_LEITURA,
+    ]
+    const desobservar = colecoesObservadas.map((colecao) =>
       observarColecao(
         colecao,
         (resultado) => {
@@ -647,9 +661,7 @@ export function AuthProvider({ children }) {
         aplicarSessao(novaSessao)
         if (!jaEraSessaoDoUsuario) registrarLogin(uid, novaSessao.nome)
       } else {
-        // Usuário deslogado no Firebase. Só encerra a sessão se ela DEPENDE do
-        // Firebase (uid presente). Sessão puramente local (admin offline) não
-        // é derrubada por um evento do Firebase.
+        // As sessões administrativas sempre dependem do Firebase.
         if (sessaoRef.current?.uid) aplicarSessao(null)
       }
       setAuthLoading(false)
@@ -666,116 +678,61 @@ export function AuthProvider({ children }) {
     // e-mail e senha). O login administrativo NUNCA é decidido por dados locais.
     const sessaoBanco = await entrarComoSessaoAdmin(emailNormalizado, senha)
 
-    if (sessaoBanco.ok) {
-      // A autorização espelha exatamente o isAdmin() das Security Rules:
-      // custom claim `admin: true` OU e-mail na lista de administradores.
-      // (antes aceitava qualquer usuário local com perfil "administrador",
-      // mesmo sem permissão no banco — o frontend achava que gravava e o
-      // Firestore negava, deixando cada navegador com o seu próprio dado.)
-      const emailFirebase = sessaoBanco.user.email || emailNormalizado
-      const autorizado = podeAdministrar({
-        email: emailFirebase,
-        claimAdmin: sessaoBanco.claimAdmin,
-      })
-
-      if (!autorizado) {
-        await logoutFirebase()
-        return { ok: false, message: 'Esta conta não tem perfil administrativo.' }
-      }
-
-      // Garante o registro do administrador na tela de Usuários (sem
-      // sobrescrever dados já cadastrados) e espelha no banco central SEM a
-      // senha — credenciais vivem no Firebase Authentication.
-      const usuarios = getStore('usuarios')
-      const existente = usuarios.find(
-        (u) => String(u.email).trim().toLowerCase() === emailFirebase.toLowerCase(),
-      )
-      const nome = existente?.nome || sessaoBanco.user.displayName || 'Administrador'
-      const perfil = existente?.perfil || 'administrador'
-      const usuarioRegistro = existente
-        ? { ...existente, uid: sessaoBanco.user.uid, perfil }
-        : {
-            id: novoId('usr'),
-            nome,
-            email: emailFirebase,
-            perfil,
-            uid: sessaoBanco.user.uid,
-            criadoEm: new Date().toLocaleDateString('pt-BR'),
-            origem: 'FIREBASE',
-          }
-      if (!existente) setStore('usuarios', [...usuarios, usuarioRegistro])
-      // sincronizarItem remove a senha antes de gravar (ver itemParaBanco).
-      sincronizarItem('usuarios', usuarioRegistro)
-
-      const novaSessao = {
-        tipo: 'admin',
-        usuarioId: usuarioRegistro.id,
-        uid: sessaoBanco.user.uid,
-        nome,
-        email: emailFirebase,
-        perfil,
-        sincronizacaoBanco: true,
-        loginEm: new Date().toLocaleString('pt-BR'),
-      }
-
-      aplicarSessao(novaSessao)
-      logar('Login administrativo', `${nome} (${perfil})`, nome)
-      registrarSucessoSync('sessão administrativa autenticada no Firebase')
-      return { ok: true, sincronizadoBanco: true }
+    if (!sessaoBanco.ok) {
+      return { ok: false, message: sessaoBanco.message || 'Não foi possível autenticar no Firebase.' }
     }
 
-    // ===== 2. Fallback local (excepcional) =====
-    // APENAS quando o Firebase Authentication não pôde ser alcançado (sem
-    // internet) OU quando a conta ainda NÃO existe lá. Quando o Firebase
-    // REJEITA as credenciais (senha inválida, conta desativada, provedor
-    // desligado), o fallback NÃO é aplicado: a decisão do Firebase prevalece —
-    // caso contrário uma senha antiga no cache local abriria um banco que o
-    // Firebase está negando (falha de segurança).
-    const fallbackPermitido =
-      sessaoBanco.motivo === 'auth/user-not-found' ||
-      sessaoBanco.motivo === 'auth/network-request-failed' ||
-      sessaoBanco.motivo === 'auth/erro-desconhecido'
+    // A autorização espelha exatamente o isAdmin() das Security Rules:
+    // custom claim `admin: true` OU e-mail na lista de administradores.
+    // (antes aceitava qualquer usuário local com perfil "administrador",
+    // mesmo sem permissão no banco — o frontend achava que gravava e o
+    // Firestore negava, deixando cada navegador com o seu próprio dado.)
+    const emailFirebase = sessaoBanco.user.email || emailNormalizado
+    const autorizado = podeAdministrar({
+      email: emailFirebase,
+      claimAdmin: sessaoBanco.claimAdmin,
+    })
 
-    if (!fallbackPermitido) {
-      return { ok: false, message: sessaoBanco.message || 'Credenciais inválidas. Verifique e-mail e senha.' }
+    if (!autorizado) {
+      await logoutFirebase()
+      return { ok: false, message: 'Esta conta não tem perfil administrativo.' }
     }
 
-    // Mantém o acesso administrativo quando NÃO há sessão no Firebase (ex.: sem
-    // internet, ou conta ainda não provisionada). NESTE MODO as alterações
-    // ficam restritas a este navegador e o painel avisa explicitamente — nunca
-    // é apresentado como se fosse o dado compartilhado.
+    // Garante uma entrada local para a tela de usuários. Perfis administrativos
+    // são lidos do banco central e só podem ser gravados pelas Functions.
     const usuarios = getStore('usuarios')
-    const usuario = usuarios.find(
-      (u) => String(u.email).trim().toLowerCase() === emailNormalizado && u.senha === senha,
+    const existente = usuarios.find(
+      (u) => String(u.email).trim().toLowerCase() === emailFirebase.toLowerCase(),
     )
-
-    if (!usuario) {
-      return {
-        ok: false,
-        message:
-          sessaoBanco.message ||
-          'Credenciais inválidas. Verifique e-mail e senha.',
-      }
-    }
-
+    const nome = existente?.nome || sessaoBanco.user.displayName || 'Administrador'
+    const perfil = existente?.perfil || 'administrador'
+    const usuarioRegistro = existente
+      ? { ...existente, uid: sessaoBanco.user.uid, perfil }
+      : {
+          id: novoId('usr'),
+          nome,
+          email: emailFirebase,
+          perfil,
+          uid: sessaoBanco.user.uid,
+          criadoEm: new Date().toLocaleDateString('pt-BR'),
+          origem: 'FIREBASE',
+        }
+    if (!existente) setStore('usuarios', [...usuarios, usuarioRegistro])
     const novaSessao = {
       tipo: 'admin',
-      usuarioId: usuario.id,
-      uid: null,
-      nome: usuario.nome,
-      email: usuario.email,
-      perfil: usuario.perfil,
-      sincronizacaoBanco: false,
+      usuarioId: usuarioRegistro.id,
+      uid: sessaoBanco.user.uid,
+      nome,
+      email: emailFirebase,
+      perfil,
+      sincronizacaoBanco: true,
       loginEm: new Date().toLocaleString('pt-BR'),
     }
 
     aplicarSessao(novaSessao)
-    logar('Login administrativo (local)', `${usuario.nome} (${usuario.perfil})`, usuario.nome)
-    registrarFalhaSync(
-      'Sessão administrativa SEM acesso ao banco compartilhado. As alterações ficam salvas APENAS neste navegador. Para sincronizar: 1) abra o Console do Firebase → Authentication → Sign-in method → ative Email/Password; 2) em Authentication → Users → Add user, crie a conta com este MESMO e-mail e senha; 3) entre novamente.',
-      sessaoBanco.motivo || 'admin/sem-sessao-banco',
-    )
-    return { ok: true, sincronizadoBanco: false }
+    logar('Login administrativo', `${nome} (${perfil})`, nome)
+    registrarSucessoSync('sessão administrativa autenticada no Firebase')
+    return { ok: true, sincronizadoBanco: true }
   }
 
   const loginCliente = async (email, senha) => {
@@ -1118,7 +1075,7 @@ export function AuthProvider({ children }) {
     return { ok: true, fatura: nova }
   }
 
-  const updateFatura = (id, dados) => {
+  const updateFatura = (id, dados, { sync = true } = {}) => {
     const faturas = getStore('faturas')
     const agora = new Date()
     const updated = faturas.map((f) =>
@@ -1128,7 +1085,7 @@ export function AuthProvider({ children }) {
     )
     setStore('faturas', updated)
     const fat = updated.find((f) => String(f.id) === String(id))
-    if (fat) sincronizarItem('faturas', fat)
+    if (fat && sync) sincronizarItem('faturas', fat)
     bumpVersao()
     logar('Fatura atualizada', `Fatura ${fat?.arquivo || id} status: ${dados.status || 'alterado'}`, session?.nome || 'Sistema')
     return { ok: true }
@@ -1146,25 +1103,19 @@ export function AuthProvider({ children }) {
   const removeFatura = async (id) => {
     const faturas = getStore('faturas')
     const fatura = faturas.find((f) => String(f.id) === String(id))
-    setStore('faturas', faturas.filter((f) => String(f.id) !== String(id)))
+    if (!fatura) return { ok: false, message: 'Fatura não encontrada.' }
 
-    let falha = null
-    if (fatura) {
-      const resultado = await sincronizarRemocao('faturas', idDocumento('faturas', fatura))
-      if (!resultado.ok) falha = resultado
-    }
-
-    bumpVersao()
-    logar('Fatura removida', `Fatura ${fatura?.arquivo || id} removida`, session?.nome || 'Sistema')
-
-    if (falha) {
+    try {
+      await removerFaturaServidor(idDocumento('faturas', fatura))
+      setStore('faturas', faturas.filter((item) => String(item.id) !== String(id)))
+      bumpVersao()
+      return { ok: true }
+    } catch (error) {
       return {
         ok: false,
-        message:
-          'A fatura foi removida deste navegador, mas o banco central recusou a exclusão. Verifique a conexão e tente novamente.',
+        message: error?.message || 'Não foi possível remover a fatura do armazenamento central.',
       }
     }
-    return { ok: true }
   }
 
   /**
@@ -1413,7 +1364,7 @@ export function AuthProvider({ children }) {
 
   const getUsuarios = () => getStore('usuarios')
 
-  const addUsuario = (dados) => {
+  const addUsuario = async (dados) => {
     if (
       !ehEmailAdminMaster(session?.email) ||
       !session?.uid ||
@@ -1425,27 +1376,34 @@ export function AuthProvider({ children }) {
       }
     }
 
-    const usuarios = getStore('usuarios')
     const email = String(dados?.email || '').trim().toLowerCase()
-    const jaExiste = usuarios.some((u) => String(u.email || '').trim().toLowerCase() === email)
-    if (jaExiste) {
+    if (getStore('usuarios').some((u) => String(u.email || '').trim().toLowerCase() === email)) {
       return { ok: false, message: 'Já existe um usuário com este e-mail.' }
     }
-    const novo = {
-      id: Date.now() + Math.random(),
-      criadoEm: new Date().toLocaleDateString('pt-BR'),
-      ...dados,
-      email,
+    try {
+      const resultado = await convidarAdministrador({ nome: dados?.nome, email })
+      const novo = {
+        id: email,
+        uid: resultado.uid,
+        nome: String(dados?.nome || '').trim(),
+        email,
+        perfil: 'administrador',
+        status: 'ativo',
+        criadoEm: 'Convite enviado',
+      }
+      setStore('usuarios', [...getStore('usuarios'), novo])
+      bumpVersao()
+      return { ok: true, usuario: novo }
+    } catch (error) {
+      const codigo = error?.code || ''
+      const message = codigo === 'functions/failed-precondition'
+        ? 'O provedor de e-mail ainda não está configurado no Firebase. Nenhuma conta foi criada.'
+        : error?.message || 'Não foi possível enviar o convite administrativo.'
+      return { ok: false, message }
     }
-    setStore('usuarios', [...usuarios, novo])
-    // `sincronizarItem` espelha no banco central SEM a senha (credenciais vivem
-    // no Firebase Authentication — ver itemParaBanco).
-    sincronizarItem('usuarios', novo)
-    logar('Usuário administrativo criado', `${novo.nome} (${novo.perfil})`, session?.nome || 'Sistema')
-    return { ok: true }
   }
 
-  const removeUsuario = (id) => {
+  const removeUsuario = async ({ uid, email }) => {
     if (
       !ehEmailAdminMaster(session?.email) ||
       !session?.uid ||
@@ -1456,15 +1414,87 @@ export function AuthProvider({ children }) {
         message: 'Somente o administrador master autenticado no Firebase pode remover usuários.',
       }
     }
-    if (session?.usuarioId === id) {
+    if ((uid && session?.uid === uid) || (email && normalizarEmail(session?.email) === normalizarEmail(email))) {
       return { ok: false, message: 'Você não pode remover o próprio usuário.' }
     }
-    const usuarios = getStore('usuarios')
-    const removido = usuarios.find((u) => String(u.id) === String(id))
-    setStore('usuarios', usuarios.filter((u) => u.id !== id))
-    if (removido) sincronizarRemocao('usuarios', idDocumento('usuarios', removido))
-    logar('Usuário administrativo removido', `Usuário ID ${id}`, session?.nome || 'Sistema')
-    return { ok: true }
+    if (!uid && !email) return { ok: false, message: 'Este perfil não possui identificador do Firebase.' }
+    try {
+      await alterarStatusAdministrador({ action: 'delete', uid, email })
+      setStore('usuarios', getStore('usuarios').filter((usuario) =>
+        uid ? String(usuario.uid) !== String(uid) : normalizarEmail(usuario.email) !== normalizarEmail(email),
+      ))
+      bumpVersao()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: error?.message || 'Não foi possível excluir a conta administrativa.' }
+    }
+  }
+
+  const desativarUsuario = async ({ uid, email }) => {
+    if (
+      !ehEmailAdminMaster(session?.email) ||
+      !session?.uid ||
+      session?.sincronizacaoBanco !== true
+    ) {
+      return { ok: false, message: 'Somente o administrador master autenticado no Firebase pode desativar usuários.' }
+    }
+    if (
+      (uid && String(uid) === String(session.uid)) ||
+      (email && normalizarEmail(email) === normalizarEmail(session.email)) ||
+      (!uid && !email)
+    ) {
+      return { ok: false, message: 'Informe outra conta administrativa para desativar.' }
+    }
+    try {
+      await alterarStatusAdministrador({ action: 'deactivate', uid, email })
+      setStore('usuarios', getStore('usuarios').map((usuario) =>
+        (uid ? String(usuario.uid) === String(uid) : normalizarEmail(usuario.email) === normalizarEmail(email))
+          ? { ...usuario, status: 'inativo' }
+          : usuario,
+      ))
+      bumpVersao()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: error?.message || 'Não foi possível desativar a conta administrativa.' }
+    }
+  }
+
+  const ativarUsuario = async ({ uid, email }) => {
+    if (!ehEmailAdminMaster(session?.email) || !session?.uid || session?.sincronizacaoBanco !== true) {
+      return { ok: false, message: 'Somente o administrador master autenticado no Firebase pode reativar usuários.' }
+    }
+    try {
+      await alterarStatusAdministrador({ action: 'activate', uid, email })
+      setStore('usuarios', getStore('usuarios').map((usuario) =>
+        (uid ? String(usuario.uid) === String(uid) : normalizarEmail(usuario.email) === normalizarEmail(email))
+          ? { ...usuario, status: 'ativo' }
+          : usuario,
+      ))
+      bumpVersao()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: error?.message || 'Não foi possível reativar a conta administrativa.' }
+    }
+  }
+
+  const atualizarUsuario = async ({ uid, email, nome }) => {
+    if (!ehEmailAdminMaster(session?.email) || !session?.uid || session?.sincronizacaoBanco !== true) {
+      return { ok: false, message: 'Somente o administrador master autenticado no Firebase pode editar usuários.' }
+    }
+    const nomeNormalizado = String(nome || '').trim()
+    if (!nomeNormalizado) return { ok: false, message: 'Informe um nome válido.' }
+    try {
+      await alterarStatusAdministrador({ action: 'update', uid, email, nome: nomeNormalizado })
+      setStore('usuarios', getStore('usuarios').map((usuario) =>
+        (uid ? String(usuario.uid) === String(uid) : normalizarEmail(usuario.email) === normalizarEmail(email))
+          ? { ...usuario, nome: nomeNormalizado }
+          : usuario,
+      ))
+      bumpVersao()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, message: error?.message || 'Não foi possível editar a conta administrativa.' }
+    }
   }
 
   // ==================== Logs ====================
@@ -1503,6 +1533,9 @@ export function AuthProvider({ children }) {
     getUsuarios,
     addUsuario,
     removeUsuario,
+    desativarUsuario,
+    ativarUsuario,
+    atualizarUsuario,
     getLogs,
     // Auto-cadastro por fatura
     getPreCadastros,

@@ -181,27 +181,12 @@ export const setIndiceSync = (indice) => {
 // comportamento correto de um sistema real centralizado no Firestore.
 
 /**
- * Bootstrap do acesso administrativo.
- *
- * ATENÇÃO: isto NÃO é dado de demonstração — é a conta de acesso do sistema.
- * A FONTE DE VERDADE da autenticação é o Firebase Authentication: a conta
- * abaixo PRECISA estar provisionada lá (mesmo e-mail e senha). Este registro
- * existe para permitir o primeiro acesso/offline e a tela de Usuários.
- *
- * Configurável por ambiente:
- *   VITE_ADMIN_EMAIL="thyagopatriota2020@gmail.com"
- *   VITE_ADMIN_PASSWORD="..."
+ * Identidade local de exibição do administrador master. Não contém credenciais
+ * nem concede acesso; a autenticação e autorização dependem do Firebase.
  */
 const BOOTSTRAP_ADMIN = {
   nome: 'Administrador',
-  email: String(
-    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_EMAIL) ||
-      'thyagopatriota2020@gmail.com',
-  )
-    .trim()
-    .toLowerCase(),
-  senha:
-    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_PASSWORD) || 'admin123',
+  email: 'thyagopatriota2020@gmail.com',
   perfil: 'administrador',
   origem: 'BOOTSTRAP',
 }
@@ -277,11 +262,14 @@ export const migrarCacheLocal = () => {
   })
   if (faturasLimpa.length !== faturas.length) setStore('faturas', faturasLimpa)
 
-  // 4. Usuários — remove usuários de demonstração e garante o bootstrap
+  // 4. Usuários — remove contas de demonstração e credenciais locais legadas
   const usuarios = getStore('usuarios')
-  const usuariosLimpos = usuarios.filter(
+  const usuariosSemDemo = usuarios.filter(
     (u) => !ASSINATURAS_DEMO.emailUsuarios.includes(String(u.email).trim().toLowerCase()),
   )
+  const usuariosLimpos = usuariosSemDemo
+    .filter((usuario) => usuario && typeof usuario === 'object')
+    .map(({ senha: _senha, senhaAcesso: _senhaAcesso, ...usuario }) => usuario)
   const jaTemBootstrap = usuariosLimpos.some(
     (u) => String(u.email).trim().toLowerCase() === BOOTSTRAP_ADMIN.email,
   )
@@ -291,7 +279,11 @@ export const migrarCacheLocal = () => {
       criadoEm: new Date().toLocaleDateString('pt-BR'),
     })
   }
-  if (usuariosLimpos.length !== usuarios.length || !jaTemBootstrap) {
+  const haviaCredenciaisLocais = usuarios.some((usuario) =>
+    usuario && typeof usuario === 'object' &&
+    (Object.hasOwn(usuario, 'senha') || Object.hasOwn(usuario, 'senhaAcesso')),
+  )
+  if (usuariosLimpos.length !== usuarios.length || !jaTemBootstrap || haviaCredenciaisLocais) {
     setStore('usuarios', usuariosLimpos)
   }
 

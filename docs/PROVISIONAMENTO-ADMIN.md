@@ -1,34 +1,35 @@
-# Provisionamento da conta administrativa no Firebase
+# Provisionamento administrativo e acesso ao banco compartilhado
 
-Este guia resolve definitivamente a mensagem:
-
-> "Sessão administrativa SEM acesso ao banco compartilhado. As alterações ficam
-> salvas apenas neste navegador..."
+Todo acesso administrativo depende de uma conta autenticada no Firebase
+Authentication. Não existe autenticação administrativa offline ou senha
+administrativa no código, em variáveis `VITE_*` ou no cache do navegador.
 
 ## Administrador master e criação de usuários
 
 O administrador master é `thyagopatriota2020@gmail.com`. Faça login com esta
 conta no Firebase Authentication para operar em qualquer dispositivo. Na tela
 **Usuários**, administradores operacionais podem consultar os perfis, mas apenas
-o master pode criar ou remover usuários. Essa restrição existe tanto na
-interface quanto nas Firestore Security Rules (`isMasterAdmin()`); não depende
-de um perfil salvo pelo navegador.
+o master pode convidar, editar o nome, ativar, desativar ou excluir usuários.
+Essas ações passam por Cloud Functions; as Security Rules bloqueiam gravações
+diretas nos perfis administrativos.
 
-Cadastre esta conta em **Firebase Console → Authentication → Users** caso ainda
-não exista. Depois publique as rules:
+Cadastre a conta master em **Firebase Console → Authentication → Users** caso
+ainda não exista. Convites para administradores operacionais são enviados pelo
+master e permitem ao destinatário definir a própria senha. Para isso, configure
+os secrets SMTP descritos no `README.md` e publique rules e Functions:
 
 ```powershell
 npx --yes firebase-tools login
 npm run deploy:rules
+npm run deploy:functions
 ```
 
 Se a senha não corresponder, use **Recuperar senha** na tela de acesso
 administrativo para receber um link de redefinição no e-mail da conta.
 
-O endereço do master é uma identidade fixa das rules e permanece autorizado
-mesmo se `VITE_ADMIN_EMAILS` for configurado para outros administradores. A
-variável de ambiente pode listar administradores operacionais; nunca a use
-como substituta das Firestore Security Rules.
+O e-mail do master é a única identidade autorizada a gerenciar administradores.
+Administradores operacionais legados permanecem alinhados à allowlist das
+Rules; novas contas recebem uma custom claim pelo fluxo de convite.
 
 ## Faturas e PDFs visíveis no portal do cliente
 
@@ -58,17 +59,11 @@ no painel. Se o cliente tiver UID e a fatura já estiver cadastrada, a duplicata
 
 ## Por que isso acontece
 
-O login administrativo valida as credenciais **no Firebase Authentication**
-(fonte da verdade — `signInWithEmailAndPassword` em `src/firebase/auth.js`).
-Sem uma sessão Firebase autenticada, o Firestore nega toda escrita
-(`request.auth == null` nas Security Rules) e o sistema só consegue salvar os
-dados no cache local do navegador.
-
-Para que os mesmos dados apareçam em outros dispositivos, o login precisa ser
-feito com a conta administrativa do **Firebase Authentication**. O cache local
-do navegador não é compartilhado. As regras do projeto são associadas ao
-projeto Firebase padrão `natureforce-65cdc`; se `VITE_FIREBASE_PROJECT_ID` foi
-configurado no deploy, publique as regras também nesse projeto.
+O login administrativo autentica exclusivamente no Firebase Authentication.
+Sem conexão ou sessão válida, o login falha — o cache local não concede acesso
+ao painel administrativo. O cache local do navegador não é compartilhado.
+As regras e Functions devem ser publicadas no projeto `natureforce-65cdc`,
+correspondente à configuração Firebase padrão do site.
 
 ## Erro de acesso à coleção `preCadastros`
 
@@ -104,12 +99,11 @@ saia e entre novamente para renovar o token.
    - Console do Firebase → projeto `natureforce-65cdc`
    - **Authentication → Sign-in method → Email/Password → Enable**
 
-2. **Criar a conta do administrador**
-   - **Authentication → Users → Add user**
-   - E-mail: `thyagopatriota2020@gmail.com` para o master.
-   - Senha: a MESMA senha usada no login do sistema
-   - IMPORTANTE: se a conta já existir com outro e-mail, use o e-mail que está
-     na lista de `firestore.rules` (função `isAdmin()`), ou atualize a lista.
+2. **Provisionar as contas**
+   - A conta master deve existir no Firebase Authentication; crie-a no Console
+     se ainda não existir.
+   - Administradores operacionais devem ser convidados pelo master na tela
+     **Usuários** após publicar a Function e configurar SMTP.
 
 3. **Publicar as Security Rules**
    - Na raiz do projeto, execute `npx --yes firebase-tools login` (uma vez) e
@@ -120,49 +114,18 @@ saia e entre novamente para renovar o token.
      site (`VITE_FIREBASE_PROJECT_ID` ou `natureforce-65cdc`).
 
 4. **Entrar novamente**
-   - Abra `/admin/login`, entre com o mesmo e-mail e senha.
-   - O aviso desaparece e o rodapé do painel passa a indicar
-     **"Firestore — banco compartilhado"** (modo `firestore`).
-
-## Opcional (recomendado em produção): custom claim `admin: true`
-
-As Security Rules aceitam duas formas de autorização:
-
-1. E-mail na lista `isAdmin()` em `firestore.rules` (já suficiente);
-2. Custom claim `admin: true` (recomendado: sobrevive a mudanças de e-mail).
-
-Para definir o claim, use o SDK Admin (servidor/CLI, nunca o frontend). O projeto
-já traz um script pronto:
-
-```bash
-# 1. salve a chave de serviço como serviceAccountKey.json na raiz do projeto
-#    (Console → Configurações do projeto → Contas de serviço → Gerar nova chave privada)
-# 2. defina a claim nos UIDs administrativos
-npm run set-admin                       # usa os UIDs padrão do projeto
-npm run set-admin -- UID1 UID2 UID3     # ou informe os UIDs
-npm run set-admin -- --remove UID1      # remove a claim de um UID
-```
-
-O script `scripts/set-admin-claim.cjs`:
-- valida que a conta existe no Firebase Auth (mostra o e-mail correspondente);
-- define `{ admin: true }` em cada UID;
-- lê a claim DE VOLTA para confirmar (prova de que funcionou).
-
-> Depois de aplicar a claim, o usuário precisa **sair e entrar novamente** para
-> o novo token valer (o token já emitido mantém as claims antigas até expirar).
-> Se o e-mail também estiver na lista `isAdmin()` das Rules, a autorização vale
-> de imediato, sem troca de token.
+   - Abra `/admin/login` e entre com a conta Firebase autorizada.
+   - A sincronização com o banco compartilhado só ocorre com a sessão
+     autenticada pelo Firebase.
 
 ## Segurança
 
-- A senha administrativa **NÃO** fica no código: vive apenas no Firebase
-  Authentication (e no campo local de bootstrap, configurável por
-  `VITE_ADMIN_PASSWORD` para o modo offline — altere-o em produção).
-- O frontend **nunca** cria contas administrativas (`createUserWithEmailAndPassword`
-  não é usado no fluxo de login admin).
-- O fallback local (sem internet / conta não provisionada) é restrito: quando o
-  Firebase **rejeita** as credenciais (senha inválida, conta desativada,
-  provedor desligado), o login falha — a decisão do Firebase prevalece.
+- Senhas vivem apenas no Firebase Authentication; a interface não as grava nem
+  cria senhas para administradores.
+- O fluxo de convite e as mudanças de perfil usam Cloud Functions autorizadas
+  exclusivamente ao master. Não copie chaves de serviço para o frontend.
+- Desativação marca o perfil como inativo antes de alterar a conta Auth, para
+  que as Rules bloqueiem o acesso imediatamente.
 
 ---
 

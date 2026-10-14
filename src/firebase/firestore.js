@@ -15,6 +15,8 @@ import {
   deleteDoc,
   onSnapshot,
   limit,
+  orderBy,
+  startAfter,
   deleteField,
 } from 'firebase/firestore'
 import { auth, db, firebaseConfig } from './config'
@@ -37,6 +39,7 @@ const camposSensiveis = (colecao) =>
 // INTEIRA — custo e tempo de resposta crescendo para sempre.
 export const LIMITE_LOGS = 400
 export const LIMITE_CHAMADOS = 300
+export const TAMANHO_PAGINA_AUDITORIA = 100
 
 // ==================== CLIENTES ====================
 
@@ -53,7 +56,6 @@ export const getClientePorUid = async (uid) => {
     return { ok: false, message: 'Erro ao buscar dados do cliente.' }
   }
 }
-
 // Cria/atualiza o documento do cliente (UID = ID do documento)
 export const salvarCliente = async (uid, dados) => {
   try {
@@ -78,7 +80,11 @@ export const atualizarCliente = async (uid, dados) => {
 
 // Observa faturas do cliente em tempo real
 export const observarFaturasDoCliente = (uid, callback) => {
-  const q = query(collection(db, 'faturas'), where('clienteId', '==', uid))
+  const q = query(
+    collection(db, 'faturas'),
+    where('clienteId', '==', uid),
+    where('status', '==', 'disponivel'),
+  )
   return onSnapshot(
     q,
     (snapshot) => {
@@ -289,7 +295,12 @@ export const criarChamado = async (uid, dados) => {
 export const listarDocumentos = async (colecao, { limite } = {}) => {
   try {
     const referencia = collection(db, colecao)
-    const snapshot = await getDocs(limite ? query(referencia, limit(limite)) : referencia)
+    const consulta = colecao === 'logs'
+      ? query(referencia, orderBy('createdAt', 'desc'), limit(limite || LIMITE_LOGS))
+      : limite
+        ? query(referencia, limit(limite))
+        : referencia
+    const snapshot = await getDocs(consulta)
     const documentos = []
     snapshot.forEach((docSnap) => {
       documentos.push({ id: docSnap.id, ...docSnap.data() })
@@ -308,6 +319,7 @@ export const listarDocumentos = async (colecao, { limite } = {}) => {
           `"${firebaseConfig.projectId}". Confirme que este é o projeto esperado, ` +
           'publique firestore.rules e confirme que o e-mail está autorizado como administrador.',
       }
+
     }
     const orientacoes = {
       unauthenticated:
@@ -328,6 +340,28 @@ export const listarDocumentos = async (colecao, { limite } = {}) => {
       message:
         orientacoes[codigo] ||
         `Não foi possível ler a coleção "${colecao}" no banco compartilhado (código: ${codigo}).`,
+    }
+  }
+}
+
+export const listarPaginaAuditoria = async ({ cursor = null } = {}) => {
+  try {
+    const partes = [collection(db, 'logs'), orderBy('createdAt', 'desc')]
+    if (cursor) partes.push(startAfter(cursor))
+    partes.push(limit(TAMANHO_PAGINA_AUDITORIA))
+    const snapshot = await getDocs(query(...partes))
+    return {
+      ok: true,
+      data: snapshot.docs.map((item) => ({ id: item.id, ...item.data() })),
+      cursor: snapshot.docs.at(-1) || cursor,
+      hasMore: snapshot.size === TAMANHO_PAGINA_AUDITORIA,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      data: [],
+      codigo: error?.code || 'firestore/erro',
+      message: error?.message || 'Não foi possível carregar a auditoria central.',
     }
   }
 }
@@ -422,7 +456,11 @@ export const dedupeFaturas = (faturas = []) => {
  */
 export const observarColecao = (colecao, callback, { limite } = {}) =>
   onSnapshot(
-    limite ? query(collection(db, colecao), limit(limite)) : collection(db, colecao),
+    colecao === 'logs'
+      ? query(collection(db, colecao), orderBy('createdAt', 'desc'), limit(limite || LIMITE_LOGS))
+      : limite
+        ? query(collection(db, colecao), limit(limite))
+        : collection(db, colecao),
     (snapshot) => {
       const documentos = []
       snapshot.forEach((docSnap) => {

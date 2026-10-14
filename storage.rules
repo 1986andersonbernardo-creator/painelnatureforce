@@ -1,33 +1,75 @@
 rules_version = '2';
 
-// ==================== REGRAS DE SEGURANÇA — FIREBASE STORAGE (PDFs de faturas) ====================
-// Os arquivos de fatura (PDF original) ficam isolados por cliente/UC.
-// Um cliente só lê o próprio PDF; o upload é feito pelo administrador.
-// Caminho: faturas/{clienteId}/{unidadeConsumidoraId}/{arquivo}
-
 service firebase.storage {
   match /b/{bucket}/o {
-
-    function isAdmin() {
-      return request.auth != null &&
-             (request.auth.token.get('admin', false) == true ||
-              request.auth.token.get('email', '') in [
-                'thyagopatriota2020@gmail.com',
-                'guladpizza@gmail.com',
-                '1986.andersonbernardo@gmail.com'
-              ]);
+    function signedIn() {
+      return request.auth != null;
     }
 
-    // PDFs privados por UID, acessíveis ao cliente dono e à equipe administrativa.
+    function isMasterAdmin() {
+      return signedIn() &&
+        request.auth.token.get('email', '') == 'thyagopatriota2020@gmail.com';
+    }
+
+    function adminNotDeactivated() {
+      let perfilPath = /databases/(default)/documents/usuarios/$(request.auth.token.email);
+      return request.auth.token.get('email', '') == '' ||
+        !firestore.exists(perfilPath) ||
+        firestore.get(perfilPath).data.get('status', 'ativo') != 'inativo';
+    }
+
+    function isAdmin() {
+      return signedIn() &&
+        (isMasterAdmin() ||
+         ((request.auth.token.get('role', '') == 'admin' ||
+           request.auth.token.get('admin', false) == true ||
+           request.auth.token.get('email', '') in [
+             'guladpizza@gmail.com',
+             '1986.andersonbernardo@gmail.com'
+           ]) && adminNotDeactivated()));
+    }
+
+    function invoiceExists(faturaId) {
+      return firestore.exists(
+        /databases/(default)/documents/faturas/$(faturaId)
+      );
+    }
+
+    function invoice(faturaId) {
+      return firestore.get(
+        /databases/(default)/documents/faturas/$(faturaId)
+      ).data;
+    }
+
     match /faturas/{clienteId}/{unidadeConsumidoraId}/{arquivo} {
-      allow read: if (request.auth != null && request.auth.uid == clienteId) || isAdmin();
-      allow create, update: if isAdmin() &&
-                            request.resource.size <= 20 * 1024 * 1024 &&
-                            request.resource.contentType == 'application/pdf';
+      function clienteAutorizado() {
+        let faturaId = resource.metadata.get('faturaId', '');
+        return signedIn() &&
+          request.auth.uid == clienteId &&
+          faturaId is string &&
+          invoiceExists(faturaId) &&
+          invoice(faturaId).clienteId == request.auth.uid &&
+          invoice(faturaId).uc == unidadeConsumidoraId &&
+          invoice(faturaId).storagePath ==
+            'faturas/' + clienteId + '/' + unidadeConsumidoraId + '/' + arquivo &&
+          invoice(faturaId).status == 'disponivel';
+      }
+
+      allow read: if isAdmin() || clienteAutorizado();
+      allow create: if isAdmin() &&
+        request.resource.size <= 20 * 1024 * 1024 &&
+        request.resource.contentType == 'application/pdf' &&
+        request.resource.metadata.get('faturaId', '') is string;
+      allow update: if isAdmin() &&
+        request.resource.size <= 20 * 1024 * 1024 &&
+        request.resource.contentType == 'application/pdf' &&
+        resource.size == request.resource.size &&
+        resource.md5Hash == request.resource.md5Hash &&
+        resource.metadata.get('faturaId', '') ==
+          request.resource.metadata.get('faturaId', '');
       allow delete: if isAdmin();
     }
 
-    // Negação padrão para qualquer outro caminho
     match /{allPaths=**} {
       allow read, write: if false;
     }

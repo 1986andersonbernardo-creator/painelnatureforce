@@ -1,7 +1,9 @@
-import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage'
+import { deleteObject, getBlob, getStorage, ref, uploadBytes } from 'firebase/storage'
+import { getFunctions, httpsCallable } from 'firebase/functions'
 import app from './config'
 
 const storage = getStorage(app)
+const functions = getFunctions(app)
 
 const normalizarSegmento = (valor) => String(valor || '').replace(/[^a-zA-Z0-9_-]/g, '_')
 
@@ -33,5 +35,12 @@ export const enviarPdfFatura = async ({ clienteUid, uc, faturaId, arquivo }) => 
   }
 }
 
-export const obterUrlPdfFatura = async (caminho) =>
-  getDownloadURL(ref(storage, String(caminho || '')))
+export const excluirPdfFatura = async (caminho) =>
+  deleteObject(ref(storage, String(caminho || '')))
+
+export const obterUrlPdfFatura = async (caminho, faturaId) => {
+  if (!faturaId) throw new Error('O identificador da fatura é obrigatório para acessar o PDF.')
+  await httpsCallable(functions, 'registrarSolicitacaoAcessoFatura')({ faturaId: String(faturaId) })
+  const blob = await getBlob(ref(storage, String(caminho || '')))
+  return URL.createObjectURL(blob)
+}

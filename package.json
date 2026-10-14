@@ -10,7 +10,11 @@
     "preview": "vite preview",
     "test": "node --test tests/run-tests.mjs",
     "deploy:rules": "npx --yes firebase-tools deploy --only firestore:rules --project natureforce-65cdc",
+    "deploy:indexes": "npx --yes firebase-tools deploy --only firestore:indexes --project natureforce-65cdc",
     "deploy:storage": "npx --yes firebase-tools deploy --only storage --project natureforce-65cdc",
+    "deploy:functions": "npx --yes firebase-tools deploy --only functions --project natureforce-65cdc",
+    "deploy:storage-cors": "gcloud storage buckets update gs://natureforce-65cdc.firebasestorage.app --cors-file=storage.cors.json",
+    "test:rules": "npx --yes firebase-tools emulators:exec --only firestore,storage --project demo-natureforce \"node --test tests/firestore.rules.test.mjs\"",
     "set-admin": "node scripts/set-admin-claim.cjs"
   },
   "dependencies": {
@@ -22,11 +26,16 @@
     "react-router-dom": "^7.18.2"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.4",
     "firebase-admin": "^14.5.0",
     "oxlint": "^1.75.0",
     "vite": "^8.2.0"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.5",
+    "uuid": "^11.1.1"
   }
 }

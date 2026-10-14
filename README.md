@@ -37,19 +37,19 @@ npm test         # testes dos módulos puros (identificação, dedup, desconto, 
 
 ## Arquitetura em uma frase
 
-**O cache local (localStorage) é o espelho de leitura; o Firestore é a fonte da
-verdade compartilhada.** Toda escrita grava localmente (síncrono), depois é
-espelhada no Firestore (assíncrono) e re-renderiza a interface por `dadosVersao`.
-As `onSnapshot` reconciliam o cache com o banco em tempo real.
+**Firestore e Firebase Storage são as fontes compartilhadas; o cache local é
+apenas uma otimização da interface.** O portal de clientes consulta as faturas
+autorizadas em tempo real pelo UID autenticado.
 
 ## Fluxos principais
 
 1. **Login** → Firebase Auth → ponte de identidade `vincularClienteAoUid`
    (propaga o UID para UCs/faturas) → dashboard.
-2. **Importação de PDF** (admin) → valida assinatura `%PDF-` → hash SHA-256
-   (dedupe) → extrai texto preservando linhas → classifica componentes →
-   aplica 20% sobre elegível → identifica UC/cliente → **fica "aguardando
-   revisão"** → admin publica → aparece na área do cliente.
+2. **Importação de PDF** (admin) → valida assinatura `%PDF-` → identifica a UC
+   e o cadastro único → envia o PDF privado ao Storage → uma callable Function
+   confirma a UC/cliente e a existência do arquivo, versiona a competência e
+   grava os metadados como disponíveis. UC ausente, ambígua ou sem cliente
+   autenticado não é publicada.
 3. **Pré-cadastro** — UC nova no PDF vira pré-cadastro; o admin confirma
    (cria cliente) **ou** associa a um cliente existente (sem duplicar cadastro).
 4. **Atendimento** — cliente envia solicitação, admin atualiza o status, o
@@ -59,20 +59,45 @@ As `onSnapshot` reconciliam o cache com o banco em tempo real.
 
 ## Segurança
 
-- `firestore.rules` — isolamento por UID: um cliente só lê/grava os próprios
-  documentos; administrador tem acesso amplo (custom claim `admin` ou e-mail na
-  allowlist).
-- `storage.rules` — PDFs privados por UID do cliente; uploads administrativos
-  limitados a arquivos PDF de até 20 MB.
+- `firestore.rules` — clientes só leem o próprio perfil, UCs e faturas
+  publicadas; só administradores editam dados de negócio. Perfis de
+  administradores e logs não podem ser escritos pelo cliente.
+- `storage.rules` — PDFs privados; a leitura do cliente exige UID, UC, caminho e
+  fatura publicada correspondentes no Firestore. A aplicação usa `getBlob()`
+  com a sessão autenticada, não URL compartilhável com token.
+- `functions/` — gerenciamento de administradores exclusivamente pelo master,
+  convite por e-mail, publicação/versionamento serializado de faturas e auditoria server-side.
+  A auditoria registra solicitações de acesso ao PDF, não confirma que o arquivo
+  foi efetivamente baixado.
+- `firestore.indexes.json` — índice composto da consulta de faturas autorizadas.
 - PDFs enviados antes da integração com o Storage continuam somente no
   IndexedDB do navegador de origem. Reenvie o mesmo PDF no painel para
   sincronizar uma fatura já cadastrada.
 - **Credenciais nunca são espelhadas no banco**: `senha`/`senhaAcesso` são
   removidas do payload por `itemParaBanco()` antes de qualquer gravação.
-- Após mudanças nas regras, execute `npx --yes firebase-tools login` uma vez
-  para autenticar o CLI e depois `npm run deploy:rules`; ou publique no Console
-  → Firestore → Rules. O site e as regras precisam usar o mesmo projeto Firebase
-  (veja `docs/PROVISIONAMENTO-ADMIN.md`).
+- As regras, índices e Functions nesta alteração são arquivos locais e ainda
+  precisam ser publicados. O projeto configurado e ativo conferido é
+  `natureforce-65cdc`. O deploy de Functions exige plano Firebase com billing
+  habilitado.
+- Configure o serviço SMTP no Secret Manager (nunca no frontend ou no Git),
+  informando cada valor quando o CLI solicitar:
+  ```bash
+  npx firebase-tools functions:secrets:set SMTP_HOST --project natureforce-65cdc
+  npx firebase-tools functions:secrets:set SMTP_PORT --project natureforce-65cdc
+  npx firebase-tools functions:secrets:set SMTP_USER --project natureforce-65cdc
+  npx firebase-tools functions:secrets:set SMTP_PASSWORD --project natureforce-65cdc
+  npx firebase-tools functions:secrets:set SMTP_FROM --project natureforce-65cdc
+  npm install --prefix functions
+  npm run deploy:functions
+  ```
+- `getBlob()` requer CORS no bucket. Configure com
+  `npm run deploy:storage-cors`; CORS não substitui as regras de autorização.
+- Publique as regras e índices com `npm run deploy:rules` e
+  `npm run deploy:indexes`;
+  publique Storage com `npm run deploy:storage`.
+- PDFs que existiam apenas no IndexedDB não são migrados automaticamente.
+  Reenvie os PDFs legados e revise cadastros ambíguos antes de publicar; nenhuma
+  fatura antiga é reassociada ou excluída automaticamente.
 
 ## Variáveis de ambiente (opcionais)
 
@@ -81,18 +106,20 @@ SDK Web). As variáveis abaixo permitem mudar sem editar código:
 
 ```bash
 VITE_FIREBASE_API_KEY=...       # demais chaves: AUTH_DOMAIN, PROJECT_ID, etc.
-VITE_ADMIN_EMAILS=guladpizza@gmail.com,1986.andersonbernardo@gmail.com   # admins operacionais
-VITE_ADMIN_EMAIL=thyagopatriota2020@gmail.com             # administrador master
-VITE_ADMIN_PASSWORD=...         # senha do bootstrap offline (troque em produção)
 ```
+
+Senhas administrativas não devem ser configuradas em variáveis `VITE_*`, no
+código ou no armazenamento local. Todo acesso administrativo depende de uma
+conta ativa no Firebase Authentication.
 
 ## Provisionamento
 
-- **Administrador**: conta no Firebase Auth com o mesmo e-mail/senha do login
-  → `docs/PROVISIONAMENTO-ADMIN.md`.
+- **Administrador**: somente a callable Function, autorizada ao master, cria a
+  conta Auth, atribui role `admin` e envia convite para definir senha. A interface
+  não recebe nem grava senha administrativa.
 - **Administrador master**: `thyagopatriota2020@gmail.com`; único autorizado
-  pelas rules a criar ou remover perfis administrativos. A conta precisa existir
-  no Firebase Authentication; publicar as rules não a cria automaticamente.
+  pelo backend a convidar, editar, ativar, desativar e excluir administradores.
+  A conta deve existir no Firebase Authentication; publicar regras não cria a conta.
 - **Cliente**: o painel cria a conta automaticamente ao cadastrar (ou pelo
   botão **Criar acesso** no cartão do cliente), sem derrubar a sessão do admin.
 

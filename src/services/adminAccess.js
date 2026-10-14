@@ -1,17 +1,8 @@
 // ==================== Autorização administrativa ====================
 // Fonte ÚNICA (frontend) de "quem é administrador".
 //
-// Por que existe: o administrador precisa de sessão no Firebase Authentication
-// para gravar no banco compartilhado. As Firestore/Storage Security Rules
-// autorizam por:
-//   1. custom claim `admin: true`  (recomendado em produção); ou
-//   2. e-mail presente na lista de administradores.
-//
-// Esta lista DEVE espelhar exatamente a lista de `firestore.rules` e
-// `storage.rules`. Ela é configurável por variável de ambiente para não exigir
-// edição de código a cada novo administrador:
-//
-//   VITE_ADMIN_EMAILS="guladpizza@gmail.com,1986.andersonbernardo@gmail.com"
+// A lista legada precisa permanecer alinhada às Firestore/Storage Rules.
+// Novos administradores recebem a custom claim pelo fluxo de convite no servidor.
 //
 // Módulo PURO (sem firebase, sem localStorage) — importável nos testes em Node.
 
@@ -21,22 +12,12 @@ export const MASTER_ADMIN_EMAIL = 'thyagopatriota2020@gmail.com'
 
 const ADMIN_EMAILS_PADRAO = 'guladpizza@gmail.com,1986.andersonbernardo@gmail.com'
 
-// O master permanece autorizado mesmo quando a lista de administradores é
-// sobrescrita em deploy. Esta lista espelha os administradores operacionais
-// de firestore.rules/storage.rules; o master é reconhecido separadamente.
+// Esta lista espelha os administradores operacionais legados das Rules.
 export const ADMIN_EMAILS = Object.freeze(
-  Array.from(
-    new Set([
-      MASTER_ADMIN_EMAIL,
-      ...String(
-        (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_EMAILS) ||
-          ADMIN_EMAILS_PADRAO,
-      )
-        .split(',')
-        .map((email) => normalizarEmail(email))
-        .filter(Boolean),
-    ]),
-  ),
+  Array.from(new Set([
+    MASTER_ADMIN_EMAIL,
+    ...ADMIN_EMAILS_PADRAO.split(',').map((email) => normalizarEmail(email)).filter(Boolean),
+  ])),
 )
 
 export const ehEmailAdminMaster = (email) =>

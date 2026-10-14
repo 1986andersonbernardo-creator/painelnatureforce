@@ -12,6 +12,7 @@ import {
   gerarChaveDedupe,
   montarChaveIdempotencia,
   gerarIdFatura,
+  normalizarUC,
   encontrarFaturaDuplicada,
   encontrarDuplicadaPorIdempotencia,
 } from '../src/services/faturaDedup.js'
@@ -49,6 +50,7 @@ import {
   filtrarFaturasDoCliente,
   ordenarPorCompetencia,
   propagarVinculoCliente,
+  usuarioParaBanco,
 } from '../src/services/persistencia.js'
 
 test('Administrador master: só a conta definida pode gerir usuários', () => {
@@ -59,6 +61,13 @@ test('Administrador master: só a conta definida pode gerir usuários', () => {
   assert.equal(podeAdministrar({ email: MASTER_ADMIN_EMAIL }), true)
   assert.equal(podeAdministrar({ email: 'operador@natureforce.com' }), false)
   assert.equal(podeAdministrar({ claimAdmin: true }), true)
+})
+
+test('Credenciais administrativas legadas nunca são persistidas como perfil', () => {
+  assert.deepEqual(
+    usuarioParaBanco({ email: 'admin@example.com', senha: 'legacy', senhaAcesso: 'legacy-client' }),
+    { email: 'admin@example.com' },
+  )
 })
 
 test('Faturas usam UID Firebase quando o cliente tem conta provisionada', () => {
@@ -202,17 +211,30 @@ test('10. UC encontrada, mas cliente incompatível → REVISAO_MANUAL', () => {
   assert.equal(r.motivo, 'CLIENTE_INCOMPATIVEL')
 })
 
-// ===================== 11. Duas faturas do mesmo mês =====================
-test('11. Duas faturas do mesmo mês (mesma UC+ref+nota) → duplicada', () => {
+// ===================== 11. Versionamento de faturas =====================
+test('11. Mesmo PDF é duplicado; outro PDF da competência cria nova versão', () => {
   const p1 = { uc: '123456', referencia: '2026-08', numeroNota: '777', hashArquivo: 'h1' }
-  const p2 = { uc: '123456', referencia: '2026-08', numeroNota: '777', hashArquivo: 'h1' }
-  assert.equal(montarChaveIdempotencia(p1), montarChaveIdempotencia(p2))
+  const p2 = { uc: '123456', referencia: '2026-08', numeroNota: '777', hashArquivo: 'h2' }
+  assert.notEqual(montarChaveIdempotencia(p1), montarChaveIdempotencia(p2))
   assert.equal(gerarChaveDedupe(p1), gerarChaveDedupe(p2))
-  const dup = encontrarFaturaDuplicada([{ chaveDedupe: gerarChaveDedupe(p1), status: 'disponivel' }], {
-    hashArquivo: 'h2',
+  const existentes = [{
+    chaveDedupe: gerarChaveDedupe(p1),
+    hashArquivo: p1.hashArquivo,
+    status: 'disponivel',
+  }]
+  assert.equal(encontrarFaturaDuplicada(existentes, {
+    hashArquivo: p1.hashArquivo,
     chaveDedupe: gerarChaveDedupe(p2),
-  })
-  assert.ok(dup, 'a segunda fatura do mesmo mês deve ser detectada como duplicada')
+  }), existentes[0])
+  assert.equal(encontrarFaturaDuplicada(existentes, {
+    hashArquivo: p2.hashArquivo,
+    chaveDedupe: gerarChaveDedupe(p2),
+  }), null)
+  assert.notEqual(gerarIdFatura(p1), gerarIdFatura(p2))
+})
+
+test('UC é normalizada sem descartar zeros à esquerda', () => {
+  assert.equal(normalizarUC('00.123-45'), '0012345')
 })
 
 // ===================== 12. Faturas de meses diferentes =====================

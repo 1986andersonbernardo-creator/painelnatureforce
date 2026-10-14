@@ -16,13 +16,41 @@ import {
 import { ehEmailAdminMaster } from '../../services/adminAccess'
 // Atendimento: as solicitações enviadas pelos clientes precisam chegar à equipe.
 import { observarTodosChamados, atualizarChamado } from '../../firebase/firestore'
+import { listarPaginaAuditoria } from '../../firebase/firestore'
 import { enviarPdfFatura } from '../../firebase/storage'
+import {
+  publicarFaturaValidada,
+  revogarTokensPdfLegados,
+} from '../../firebase/adminFunctions'
 
 const formatCurrency = (value) =>
   new Intl.NumberFormat('pt-BR', {
     style: 'currency',
     currency: 'BRL',
   }).format(value)
+
+const publicarFaturaComValidacao = async (fatura) => {
+  if (!fatura?.storagePath) {
+    throw new Error('O PDF não está no armazenamento compartilhado. Reenvie o arquivo antes de publicar.')
+  }
+  const ucExtraida = fatura.componentes?.uc ||
+    window.prompt(`Confirme a UC identificada no PDF (cadastro: ${fatura.uc || '—'}):`)
+  if (!ucExtraida) throw new Error('Publicação cancelada: a UC precisa ser confirmada.')
+  const faturaId = fatura.idFatura || fatura.firestoreId || gerarIdFatura({
+    uc: fatura.uc,
+    referencia: fatura.referencia,
+    numeroNota: fatura.numeroNota,
+    hashArquivo: fatura.hashArquivo,
+  })
+  return publicarFaturaValidada({
+    faturaId,
+    uc: fatura.uc,
+    ucExtraida,
+    referencia: fatura.referencia,
+    storagePath: fatura.storagePath,
+    fatura,
+  })
+}
 
 /**
  * Mantém o estado local da seção em sincronia com o cache que recebe as
@@ -1221,17 +1249,32 @@ function FaturasSection() {
         const validacao = resultado.validacao || { valido: false, erros: [] }
 
         // ===== 4. Identifica a UC =====
-        const ucExtraida = normalizarUC(componentes.uc)
+        const ucOriginal = normalizarUC(componentes.uc)
+        let ucExtraida = ucOriginal
+        let ucConfirmadaManualmente = false
+        if (!ucExtraida || componentes.confiancas?.uc !== 'CONFIRMADO') {
+          const confirmada = window.prompt(
+            `A UC não foi identificada com confiança. Informe/confirme a UC do PDF ${file.name}:`,
+            ucExtraida,
+          )
+          ucExtraida = normalizarUC(confirmada)
+          ucConfirmadaManualmente = Boolean(ucExtraida)
+        }
         if (ucExtraida) {
           atualizarItem(key, { uc: ucExtraida })
-          adicionarPasso(key, `✓ UC identificada: ${ucExtraida}`)
+          adicionarPasso(
+            key,
+            ucConfirmadaManualmente
+              ? `✓ UC confirmada manualmente: ${ucExtraida}`
+              : `✓ UC identificada: ${ucExtraida}`,
+          )
         }
 
         // ===== 5. Identifica UC e cliente (prioridade: UC → cliente vinculado) =====
         let clienteDestino = null
         let unidadeDestino = null
         const decisao = identificarFatura({
-          componentes,
+          componentes: { ...componentes, uc: ucExtraida },
           unidades: getUnidades(),
           clientes: getClientes(),
         })
@@ -1384,11 +1427,13 @@ function FaturasSection() {
                 ? STATUS_FATURA.ERRO_EXTRACAO
                 : STATUS_FATURA.REVISAO_MANUAL,
           motivoIdentificacao: decisao.motivo || null,
+          ucConfirmadaManualmente,
           // Rastreio do pipeline
           vinculadaAutomaticamente: Boolean(clienteDestino),
           pendenteVinculacao: !clienteDestino,
         }
 
+        let publicadaCentral = false
         if (clienteDestino?.uid) {
           const envioPdf = await enviarPdfFatura({
             clienteUid: clienteDestino.uid,
@@ -1397,9 +1442,33 @@ function FaturasSection() {
             arquivo: file,
           })
           if (envioPdf.ok) {
-            dadosFatura.storagePath = envioPdf.caminho
-            dadosFatura.erroPdfCompartilhado = null
-            adicionarPasso(key, '✓ PDF salvo no armazenamento compartilhado')
+            try {
+              const publicacao = await publicarFaturaValidada({
+                faturaId: idFatura,
+                uc: dadosFatura.uc,
+                ucExtraida: ucExtraida,
+                referencia: dadosFatura.referencia,
+                storagePath: envioPdf.caminho,
+                fatura: dadosFatura,
+              })
+              dadosFatura.status = 'disponivel'
+              dadosFatura.versao = publicacao.version
+              dadosFatura.versaoAtual = true
+              dadosFatura.storagePath = envioPdf.caminho
+              dadosFatura.firestoreId = idFatura
+              dadosFatura.clienteId = publicacao.clienteId
+              dadosFatura.clienteIdLocal = publicacao.clienteIdLocal || clienteDestino.id
+              dadosFatura.erroPdfCompartilhado = null
+              publicadaCentral = true
+              adicionarPasso(key, '✓ PDF e metadados publicados no portal do cliente')
+            } catch (error) {
+              dadosFatura.status = 'aguardando revisão'
+              dadosFatura.erroPdfCompartilhado =
+                error?.message || 'Não foi possível validar e publicar a fatura.'
+              atualizarItem(key, {
+                aviso: `A fatura não foi publicada: ${dadosFatura.erroPdfCompartilhado}`,
+              })
+            }
           } else {
             dadosFatura.erroPdfCompartilhado = envioPdf.message
             atualizarItem(key, {
@@ -1416,9 +1485,16 @@ function FaturasSection() {
 
         // ===== 10. Salva no Firestore (não bloqueia) e no localStorage =====
         try {
-          const resultadoFirestore = await comTimeout(salvarFaturaIdempotenteFirestore(dadosFatura), 8000)
-          if (resultadoFirestore.ok) {
-            dadosFatura.firestoreId = resultadoFirestore.id
+          if (publicadaCentral) {
+            dadosFatura.firestoreId = idFatura
+          } else {
+            const resultadoFirestore = await comTimeout(
+              salvarFaturaIdempotenteFirestore(dadosFatura),
+              8000,
+            )
+            if (resultadoFirestore.ok) {
+              dadosFatura.firestoreId = resultadoFirestore.id
+            }
           }
         } catch (e) {
           console.warn('Firestore indisponível — fatura salva apenas localmente:', e.message)
@@ -1564,10 +1640,28 @@ function FaturasSection() {
     }, 5000)
   }
 
-  const publicarFatura = (id) => {
-    updateFatura(id, { status: 'disponivel' })
-    setMensagem('Fatura publicada e disponível para o cliente.')
-    setTimeout(() => setMensagem(''), 3000)
+  const publicarFatura = async (id) => {
+    const fatura = getFaturas().find((item) => String(item.id) === String(id))
+    if (!fatura) {
+      setMensagemErro('A fatura não foi encontrada no cadastro central.')
+      return
+    }
+    try {
+      const resultado = await publicarFaturaComValidacao(fatura)
+      updateFatura(id, {
+        status: 'disponivel',
+        clienteId: resultado.clienteId,
+        clienteIdLocal: resultado.clienteIdLocal,
+        versao: resultado.version,
+        versaoAtual: true,
+        idFatura: resultado.faturaId,
+      }, { sync: false })
+      setMensagem('Fatura validada e disponível no painel do cliente.')
+      setTimeout(() => setMensagem(''), 4000)
+    } catch (error) {
+      setMensagemErro(error?.message || 'Não foi possível publicar a fatura.')
+      setTimeout(() => setMensagemErro(''), 8000)
+    }
     refresh()
   }
 
@@ -2293,10 +2387,27 @@ function RevisoesSection() {
 
   const faturasRequerRevisao = faturas.filter((f) => f.status === 'requer revisão' || f.status === 'erro')
 
-  const aprovarFatura = (id) => {
-    updateFatura(id, { status: 'disponivel' })
-    setMensagem('Fatura aprovada e publicada para o cliente.')
-    setTimeout(() => setMensagem(''), 3000)
+  const aprovarFatura = async (id) => {
+    const fatura = getFaturas().find((item) => String(item.id) === String(id))
+    if (!fatura) {
+      setMensagem('A fatura não foi encontrada.')
+      return
+    }
+    try {
+      const resultado = await publicarFaturaComValidacao(fatura)
+      updateFatura(id, {
+        status: 'disponivel',
+        clienteId: resultado.clienteId,
+        clienteIdLocal: resultado.clienteIdLocal,
+        versao: resultado.version,
+        versaoAtual: true,
+        idFatura: resultado.faturaId,
+      }, { sync: false })
+      setMensagem('Fatura validada e publicada para o cliente.')
+    } catch (error) {
+      setMensagem(error?.message || 'Não foi possível publicar a fatura.')
+    }
+    setTimeout(() => setMensagem(''), 8000)
     refresh()
   }
 
@@ -2382,25 +2493,28 @@ function RevisoesSection() {
 
 /* ======================== SEÇÃO USUÁRIOS ======================== */
 function UsuariosSection() {
-  const { getUsuarios, addUsuario, removeUsuario, session } = useAuth()
+  const { getUsuarios, addUsuario, removeUsuario, desativarUsuario, ativarUsuario, atualizarUsuario, session } = useAuth()
   const isMaster = ehEmailAdminMaster(session?.email)
   const [usuarios, setUsuarios] = useDadosSincronizados(getUsuarios, getUsuarios())
   const [showForm, setShowForm] = useState(false)
   const [mensagem, setMensagem] = useState('')
-  const [form, setForm] = useState({ nome: '', email: '', senha: '', perfil: 'operador' })
+  const [form, setForm] = useState({ nome: '', email: '' })
+  const [salvando, setSalvando] = useState(false)
 
   const refresh = () => setUsuarios(getUsuarios())
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault()
-    const result = addUsuario(form)
-    setMensagem(result.ok ? 'Usuário criado com sucesso!' : result.message)
+    setSalvando(true)
+    const result = await addUsuario(form)
+    setSalvando(false)
+    setMensagem(result.ok ? 'Convite enviado por e-mail.' : result.message)
     if (result.ok) {
       setShowForm(false)
-      setForm({ nome: '', email: '', senha: '', perfil: 'operador' })
+      setForm({ nome: '', email: '' })
       refresh()
     }
-    setTimeout(() => setMensagem(''), 3000)
+    setTimeout(() => setMensagem(''), 6000)
   }
 
   return (
@@ -2419,7 +2533,7 @@ function UsuariosSection() {
 
       {!isMaster && (
         <p style={{ color: '#b45309', background: '#fef3c7', padding: '10px', borderRadius: '8px', marginBottom: '12px' }}>
-          Acesso somente para consulta. Apenas o administrador master pode criar ou remover usuários.
+          Acesso somente para consulta.           Apenas o administrador master pode criar, editar, ativar, desativar ou excluir usuários.
         </p>
       )}
 
@@ -2440,20 +2554,10 @@ function UsuariosSection() {
               <span>E-mail *</span>
               <input type="email" required value={form.email} onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))} />
             </div>
-            <div className="field">
-              <span>Senha *</span>
-              <input type="password" required value={form.senha} onChange={(e) => setForm((f) => ({ ...f, senha: e.target.value }))} />
-            </div>
-            <div className="field">
-              <span>Perfil *</span>
-              <select value={form.perfil} onChange={(e) => setForm((f) => ({ ...f, perfil: e.target.value }))}>
-                <option value="operador">Operador</option>
-                <option value="administrador">Administrador</option>
-              </select>
-            </div>
+            <p className="field-help">O administrador receberá um convite para definir a própria senha.</p>
           </div>
-          <button type="submit" className="primary-button" style={{ marginTop: '12px' }}>
-            Criar usuário
+          <button type="submit" className="primary-button" disabled={salvando} style={{ marginTop: '12px' }}>
+            {salvando ? 'Enviando convite…' : 'Enviar convite'}
           </button>
         </form>
       )}
@@ -2462,14 +2566,65 @@ function UsuariosSection() {
         <div key={u.id} className="invoice-item" style={{ marginBottom: '8px', padding: '10px', background: '#f8fafc', borderRadius: '8px' }}>
           <div>
             <strong>{u.nome}</strong>
-            {u.perfil === 'administrador' ? <span className="tag tag-success">Admin</span> : <span className="tag tag-neutral">Operador</span>}
+            <span className={u.status === 'inativo' ? 'tag tag-neutral' : 'tag tag-success'}>
+              {u.status === 'inativo' ? 'Inativo' : 'Admin'}
+            </span>
             {ehEmailAdminMaster(u.email) && <span className="tag tag-warning">Master</span>}
-            <small style={{ display: 'block', color: '#64748b' }}>{u.email} · Criado em {u.criadoEm}</small>
+            <small style={{ display: 'block', color: '#64748b' }}>
+              {u.email} · Criado em {u.criadoEm?.toDate?.().toLocaleDateString('pt-BR') || u.criadoEm || '—'}
+            </small>
           </div>
-          {isMaster && u.id !== session?.usuarioId && (
-            <button type="button" onClick={() => { removeUsuario(u.id); refresh(); }}>
-              Remover
-            </button>
+          {isMaster && !ehEmailAdminMaster(u.email) && (u.uid || u.email) && (
+            <div className="invoice-actions">
+              <button
+                type="button"
+                onClick={async () => {
+                  const nome = window.prompt('Nome do administrador:', u.nome || '')
+                  if (nome === null || !nome.trim()) return
+                  const result = await atualizarUsuario({ uid: u.uid, email: u.email, nome })
+                  setMensagem(result.ok ? 'Dados do administrador atualizados.' : result.message)
+                  refresh()
+                }}
+              >
+                Editar nome
+              </button>
+              {u.status === 'inativo' ? (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!window.confirm(`Reativar a conta administrativa de ${u.email}?`)) return
+                    const result = await ativarUsuario({ uid: u.uid, email: u.email })
+                    setMensagem(result.ok ? 'Conta administrativa reativada.' : result.message)
+                    refresh()
+                  }}
+                >
+                  Reativar
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (!window.confirm(`Desativar a conta administrativa de ${u.email}?`)) return
+                    const result = await desativarUsuario({ uid: u.uid, email: u.email })
+                    setMensagem(result.ok ? 'Conta administrativa desativada.' : result.message)
+                    refresh()
+                  }}
+                >
+                  Desativar
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!window.confirm(`Excluir definitivamente a conta de ${u.email}?`)) return
+                  const result = await removeUsuario({ uid: u.uid, email: u.email })
+                  setMensagem(result.ok ? 'Conta administrativa excluída.' : result.message)
+                  refresh()
+                }}
+              >
+                Excluir
+              </button>
+            </div>
           )}
         </div>
       ))}
@@ -2479,31 +2634,132 @@ function UsuariosSection() {
 
 /* ======================== SEÇÃO LOGS ======================== */
 function LogsSection() {
-  const { getLogs } = useAuth()
-  const logs = getLogs()
+  const { session } = useAuth()
+  const [logs, setLogs] = useState([])
+  const [cursor, setCursor] = useState(null)
+  const [hasMore, setHasMore] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [erro, setErro] = useState('')
+  const [statusRevogacao, setStatusRevogacao] = useState('')
+  const [revogando, setRevogando] = useState(false)
+  const [filtros, setFiltros] = useState({ inicio: '', fim: '', responsavel: '', cliente: '', operacao: '' })
+
+  const carregarPagina = async (proximoCursor = null) => {
+    setLoading(true)
+    const resultado = await listarPaginaAuditoria({ cursor: proximoCursor })
+    setLoading(false)
+    if (!resultado.ok) {
+      setErro(resultado.message)
+      return
+    }
+    setErro('')
+    setCursor(resultado.cursor)
+    setHasMore(resultado.hasMore)
+    setLogs((atuais) => {
+      const vistos = new Set(atuais.map((item) => item.id))
+      return [...atuais, ...resultado.data.filter((item) => !vistos.has(item.id))]
+    })
+  }
+
+  useEffect(() => {
+    carregarPagina()
+  }, [])
+
+  const logsFiltrados = logs.filter((log) => {
+    const data = log.createdAt?.toDate?.()
+    const dia = data ? data.toISOString().slice(0, 10) : ''
+    const responsavel = `${log.actorEmail || ''} ${log.actorUid || ''}`.toLowerCase()
+    const cliente = `${log.clienteId || ''} ${log.uc || ''}`.toLowerCase()
+    return (!filtros.inicio || dia >= filtros.inicio) &&
+      (!filtros.fim || dia <= filtros.fim) &&
+      (!filtros.responsavel || responsavel.includes(filtros.responsavel.toLowerCase())) &&
+      (!filtros.cliente || cliente.includes(filtros.cliente.toLowerCase())) &&
+      (!filtros.operacao || `${log.operation || ''} ${log.entity || ''}`.toLowerCase().includes(filtros.operacao.toLowerCase()))
+  })
 
   return (
     <section className="panel">
       <div className="panel-header compact">
         <div>
           <span className="eyebrow">Auditoria</span>
-          <h3>Histórico de ações ({logs.length})</h3>
+          <h3>Histórico de ações ({logsFiltrados.length} de {logs.length} carregados)</h3>
         </div>
+        {ehEmailAdminMaster(session?.email) && (
+          <button
+            type="button"
+            disabled={revogando}
+            onClick={async () => {
+              const confirmou = window.confirm(
+                'Revogar os tokens públicos antigos dos PDFs? Links antigos deixarão de funcionar; o acesso autenticado continuará disponível.',
+              )
+              if (!confirmou) return
+              setRevogando(true)
+              setStatusRevogacao('Revogação em andamento…')
+              try {
+                const resultado = await revogarTokensPdfLegados(({ filesScanned, tokensRevogados }) => {
+                  setStatusRevogacao(`${filesScanned} arquivos analisados; ${tokensRevogados} tokens revogados.`)
+                })
+                setStatusRevogacao(
+                  `Concluído: ${resultado.tokensRevogados} tokens revogados em ${resultado.filesScanned} arquivos.`,
+                )
+              } catch (error) {
+                setStatusRevogacao(error?.message || 'A revogação falhou ou foi parcial. Execute novamente para continuar.')
+              } finally {
+                setRevogando(false)
+              }
+            }}
+          >
+            {revogando ? 'Revogando…' : 'Revogar tokens antigos dos PDFs'}
+          </button>
+        )}
       </div>
 
+      {statusRevogacao && <p role="status">{statusRevogacao}</p>}
+      <div className="profile-grid" style={{ marginBottom: '16px' }}>
+        <label className="field">
+          <span>De</span>
+          <input type="date" value={filtros.inicio} onChange={(event) => setFiltros((atual) => ({ ...atual, inicio: event.target.value }))} />
+        </label>
+        <label className="field">
+          <span>Até</span>
+          <input type="date" value={filtros.fim} onChange={(event) => setFiltros((atual) => ({ ...atual, fim: event.target.value }))} />
+        </label>
+        <label className="field">
+          <span>Responsável (e-mail ou UID)</span>
+          <input value={filtros.responsavel} onChange={(event) => setFiltros((atual) => ({ ...atual, responsavel: event.target.value }))} />
+        </label>
+        <label className="field">
+          <span>Cliente ou UC</span>
+          <input value={filtros.cliente} onChange={(event) => setFiltros((atual) => ({ ...atual, cliente: event.target.value }))} />
+        </label>
+        <label className="field">
+          <span>Operação</span>
+          <input value={filtros.operacao} onChange={(event) => setFiltros((atual) => ({ ...atual, operacao: event.target.value }))} />
+        </label>
+      </div>
+
+      {erro && <p role="alert" className="error-message">{erro}</p>}
+      {!logsFiltrados.length && !loading && !erro && <p>Nenhum registro corresponde aos filtros.</p>}
       <div style={{ maxHeight: '600px', overflowY: 'auto' }}>
-        {logs.map((log) => (
+        {logsFiltrados.map((log) => (
           <div key={log.id} className="invoice-item" style={{ marginBottom: '6px', padding: '8px', background: '#f8fafc', borderRadius: '8px' }}>
             <div>
-              <strong>{log.acao}</strong>
-              <small style={{ display: 'block', color: '#64748b' }}>{log.detalhe}</small>
+              <strong>{log.operation} · {log.entity}</strong>
+              <small style={{ display: 'block', color: '#64748b' }}>
+                {log.clienteId ? `Cliente ${log.clienteId}` : ''}{log.uc ? ` · UC ${log.uc}` : ''}{log.entityId ? ` · Registro ${log.entityId}` : ''}
+              </small>
             </div>
             <small style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>
-              {log.usuario} · {log.data}
+              {log.actorEmail || log.actorUid || 'Sistema'} ({log.actorRole || 'perfil desconhecido'}) · {log.createdAt?.toDate?.().toLocaleString('pt-BR') || '—'}
             </small>
           </div>
         ))}
       </div>
+      {hasMore && (
+        <button type="button" disabled={loading} onClick={() => carregarPagina(cursor)}>
+          {loading ? 'Carregando…' : 'Carregar registros anteriores'}
+        </button>
+      )}
     </section>
   )
 }

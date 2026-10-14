@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../../context/AuthContext'
-import { obterArquivo, getStore, setStore } from '../../store/db'
+import { getStore, setStore } from '../../store/db'
 import logo from '../../assets/logo.png'
 // Isolamento: SOMENTE as faturas deste cliente (id local, UID ou UCs dele).
 import {
@@ -435,18 +435,31 @@ export function ClienteDashboard() {
                           <button
                             type="button"
                             onClick={async () => {
+                              const janela = window.open('about:blank', '_blank')
+                              if (janela) janela.opener = null
                               try {
                                 const data = fat.storagePath
-                                  ? await obterUrlPdfFatura(fat.storagePath)
-                                  : await obterArquivo(fat.id)
-                                if (data) {
-                                  window.open(data, '_blank')
-                                } else {
+                                  ? await obterUrlPdfFatura(
+                                      fat.storagePath,
+                                      fat.idFatura || fat.firestoreId || fat.id,
+                                    )
+                                  : null
+                                if (!data) {
+                                  janela?.close()
                                   alert(
                                     'O PDF desta fatura ainda não foi enviado ao armazenamento compartilhado. Peça à equipe administrativa para reenviar o arquivo.',
                                   )
+                                  return
                                 }
+                                if (!janela) {
+                                  URL.revokeObjectURL(data)
+                                  alert('O navegador bloqueou a nova janela. Permita pop-ups para visualizar o PDF.')
+                                  return
+                                }
+                                janela.location.href = data
+                                window.setTimeout(() => URL.revokeObjectURL(data), 60000)
                               } catch (error) {
+                                janela?.close()
                                 alert(error?.message || 'Não foi possível abrir o PDF desta fatura.')
                               }
                             }}
@@ -458,18 +471,22 @@ export function ClienteDashboard() {
                             onClick={async () => {
                               try {
                                 const data = fat.storagePath
-                                  ? await obterUrlPdfFatura(fat.storagePath)
-                                  : await obterArquivo(fat.id)
-                                if (data) {
-                                  const link = document.createElement('a')
-                                  link.href = data
-                                  link.download = fat.arquivo || 'fatura.pdf'
-                                  link.click()
-                                } else {
+                                  ? await obterUrlPdfFatura(
+                                      fat.storagePath,
+                                      fat.idFatura || fat.firestoreId || fat.id,
+                                    )
+                                  : null
+                                if (!data) {
                                   alert(
                                     'O PDF desta fatura ainda não foi enviado ao armazenamento compartilhado. Peça à equipe administrativa para reenviar o arquivo.',
                                   )
+                                  return
                                 }
+                                const link = document.createElement('a')
+                                link.href = data
+                                link.download = fat.arquivo || 'fatura.pdf'
+                                link.click()
+                                window.setTimeout(() => URL.revokeObjectURL(data), 60000)
                               } catch (error) {
                                 alert(error?.message || 'Não foi possível baixar o PDF desta fatura.')
                               }

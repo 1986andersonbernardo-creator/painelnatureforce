@@ -43,11 +43,7 @@ export const loginComEmail = async (email, senha) => {
 }
 
 // ==================== Sessão Firebase do administrador ====================
-// O login administrativo continua validando as credenciais na lista local
-// (comportamento existente), mas TENTA obter uma sessão Firebase com as mesmas
-// credenciais. Sem sessão Firebase o Firestore nega qualquer escrita
-// (request.auth == null) — era essa a causa das alterações administrativas
-// serem "salvas" e depois reaparecerem os dados antigos.
+// A autenticação administrativa ocorre exclusivamente no Firebase.
 //
 // Importante: esta função NUNCA cria contas (createUserWithEmailAndPassword);
 // apenas entra com uma conta já provisionada no Firebase Authentication.
@@ -76,7 +72,7 @@ export const entrarComoSessaoAdmin = async (email, senha) => {
     switch (motivo) {
       case 'auth/user-not-found':
         message =
-          'Esta conta ainda NÃO existe no Firebase Authentication. Crie-a no Console do Firebase (Authentication → Users → Add user) com o MESMO e-mail e senha usados aqui.'
+          'Esta conta ainda não existe no Firebase Authentication. Solicite um convite ao administrador master; a conta master precisa ser provisionada no Firebase Authentication.'
         break
       case 'auth/invalid-credential':
       case 'auth/wrong-password':
