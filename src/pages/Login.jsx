@@ -157,10 +157,13 @@ export function LoginAdmin() {
   })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [recuperandoSenha, setRecuperandoSenha] = useState(false)
+  const [mensagemRecuperacao, setMensagemRecuperacao] = useState('')
 
   const handleSubmit = async (event) => {
     event.preventDefault()
     setError('')
+    setMensagemRecuperacao('')
     setLoading(true)
     // loginAdmin autentica no Firebase (async) — é obrigatório aguardar.
     const result = await loginAdmin(form.email, form.password)
@@ -169,6 +172,26 @@ export function LoginAdmin() {
       navigate('/admin/dashboard')
     } else {
       setError(result.message || 'Não foi possível entrar. Tente novamente.')
+    }
+  }
+
+  const handleRecuperarSenha = async () => {
+    setError('')
+    setMensagemRecuperacao('')
+
+    if (!form.email.trim()) {
+      setError('Digite o e-mail administrativo para recuperar a senha.')
+      return
+    }
+
+    setRecuperandoSenha(true)
+    const resultado = await recuperarSenha(form.email.trim())
+    setRecuperandoSenha(false)
+
+    if (resultado.ok) {
+      setMensagemRecuperacao(resultado.message)
+    } else {
+      setError(resultado.message)
     }
   }
 
@@ -210,9 +233,21 @@ export function LoginAdmin() {
         </label>
 
         {error ? <p className="login-error">{error}</p> : null}
+        {mensagemRecuperacao ? (
+          <p className="login-success">{mensagemRecuperacao}</p>
+        ) : null}
 
         <button type="submit" className="primary-button large-btn" disabled={loading}>
           {loading ? 'Entrando...' : 'Entrar'}
+        </button>
+
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={handleRecuperarSenha}
+          disabled={recuperandoSenha}
+        >
+          {recuperandoSenha ? 'Enviando...' : 'Recuperar senha'}
         </button>
 
         <Link to="/login" className="auth-switch-link">

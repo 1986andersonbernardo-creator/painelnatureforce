@@ -22,6 +22,9 @@ npx --yes firebase-tools login
 npm run deploy:rules
 ```
 
+Se a senha não corresponder, use **Recuperar senha** na tela de acesso
+administrativo para receber um link de redefinição no e-mail da conta.
+
 O endereço do master é uma identidade fixa das rules e permanece autorizado
 mesmo se `VITE_ADMIN_EMAILS` for configurado para outros administradores. A
 variável de ambiente pode listar administradores operacionais; nunca a use
