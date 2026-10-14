@@ -17,7 +17,7 @@ import {
   limit,
   deleteField,
 } from 'firebase/firestore'
-import { db } from './config'
+import { auth, db, firebaseConfig } from './config'
 import { gerarIdFatura, montarChaveIdempotencia } from '../services/faturaDedup'
 import { idDocumento, itemParaBanco } from '../services/persistencia'
 
@@ -297,9 +297,19 @@ export const listarDocumentos = async (colecao, { limite } = {}) => {
     return { ok: true, data: documentos }
   } catch (error) {
     const codigo = error?.code || 'firestore/erro'
+    if (codigo === 'permission-denied') {
+      const email = auth.currentUser?.email || 'sem sessão do Firebase'
+      return {
+        ok: false,
+        data: [],
+        codigo,
+        message:
+          `A conta "${email}" não tem permissão para ler "${colecao}" no projeto ` +
+          `"${firebaseConfig.projectId}". Confirme que este é o projeto esperado, ` +
+          'publique firestore.rules e confirme que o e-mail está autorizado como administrador.',
+      }
+    }
     const orientacoes = {
-      'permission-denied':
-        `Acesso negado à coleção "${colecao}". Confira se as regras do Firestore foram publicadas e se a conta está autorizada como administradora.`,
       unauthenticated:
         'A sessão do Firebase expirou ou não está autenticada. Saia do painel e entre novamente.',
       'auth/network-request-failed':

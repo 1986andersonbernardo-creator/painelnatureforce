@@ -18,7 +18,11 @@ import {
   criarContaCliente,
 } from '../firebase/auth'
 // Autorização administrativa — a MESMA lista usada nas Firestore Security Rules.
-import { ehEmailAdmin, podeAdministrar } from '../services/adminAccess'
+import {
+  ehEmailAdmin,
+  ehEmailAdminMaster,
+  podeAdministrar,
+} from '../services/adminAccess'
 import {
   getClientePorUid,
   salvarCliente,
@@ -1325,8 +1329,20 @@ export function AuthProvider({ children }) {
   const getUsuarios = () => getStore('usuarios')
 
   const addUsuario = (dados) => {
+    if (
+      !ehEmailAdminMaster(session?.email) ||
+      !session?.uid ||
+      session?.sincronizacaoBanco !== true
+    ) {
+      return {
+        ok: false,
+        message: 'Somente o administrador master autenticado no Firebase pode criar usuários.',
+      }
+    }
+
     const usuarios = getStore('usuarios')
-    const jaExiste = usuarios.some((u) => u.email.toLowerCase() === dados.email.toLowerCase())
+    const email = String(dados?.email || '').trim().toLowerCase()
+    const jaExiste = usuarios.some((u) => String(u.email || '').trim().toLowerCase() === email)
     if (jaExiste) {
       return { ok: false, message: 'Já existe um usuário com este e-mail.' }
     }
@@ -1334,6 +1350,7 @@ export function AuthProvider({ children }) {
       id: Date.now() + Math.random(),
       criadoEm: new Date().toLocaleDateString('pt-BR'),
       ...dados,
+      email,
     }
     setStore('usuarios', [...usuarios, novo])
     // `sincronizarItem` espelha no banco central SEM a senha (credenciais vivem
@@ -1344,6 +1361,16 @@ export function AuthProvider({ children }) {
   }
 
   const removeUsuario = (id) => {
+    if (
+      !ehEmailAdminMaster(session?.email) ||
+      !session?.uid ||
+      session?.sincronizacaoBanco !== true
+    ) {
+      return {
+        ok: false,
+        message: 'Somente o administrador master autenticado no Firebase pode remover usuários.',
+      }
+    }
     if (session?.usuarioId === id) {
       return { ok: false, message: 'Você não pode remover o próprio usuário.' }
     }

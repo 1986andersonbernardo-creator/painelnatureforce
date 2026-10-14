@@ -66,7 +66,9 @@ As `onSnapshot` reconciliam o cache com o banco em tempo real.
   navegador do admin, em IndexedDB).
 - **Credenciais nunca são espelhadas no banco**: `senha`/`senhaAcesso` são
   removidas do payload por `itemParaBanco()` antes de qualquer gravação.
-- Após mudanças nas regras, **publique** no Console → Firestore → Rules
+- Após mudanças nas regras, execute `npx --yes firebase-tools login` uma vez
+  para autenticar o CLI e depois `npm run deploy:rules`; ou publique no Console
+  → Firestore → Rules. O site e as regras precisam usar o mesmo projeto Firebase
   (veja `docs/PROVISIONAMENTO-ADMIN.md`).
 
 ## Variáveis de ambiente (opcionais)
@@ -76,8 +78,8 @@ SDK Web). As variáveis abaixo permitem mudar sem editar código:
 
 ```bash
 VITE_FIREBASE_API_KEY=...       # demais chaves: AUTH_DOMAIN, PROJECT_ID, etc.
-VITE_ADMIN_EMAILS=guladpizza@gmail.com,1986.andersonbernardo@gmail.com   # allowlist de admin
-VITE_ADMIN_EMAIL=guladpizza@gmail.com                      # conta de bootstrap
+VITE_ADMIN_EMAILS=guladpizza@gmail.com,1986.andersonbernardo@gmail.com   # admins operacionais
+VITE_ADMIN_EMAIL=thyagopatriota2020@gmail.com             # administrador master
 VITE_ADMIN_PASSWORD=...         # senha do bootstrap offline (troque em produção)
 ```
 
@@ -85,6 +87,9 @@ VITE_ADMIN_PASSWORD=...         # senha do bootstrap offline (troque em produç�
 
 - **Administrador**: conta no Firebase Auth com o mesmo e-mail/senha do login
   → `docs/PROVISIONAMENTO-ADMIN.md`.
+- **Administrador master**: `thyagopatriota2020@gmail.com`; único autorizado
+  pelas rules a criar ou remover perfis administrativos. A conta precisa existir
+  no Firebase Authentication; publicar as rules não a cria automaticamente.
 - **Cliente**: o painel cria a conta automaticamente ao cadastrar (ou pelo
   botão **Criar acesso** no cartão do cliente), sem derrubar a sessão do admin.
 

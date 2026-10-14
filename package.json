@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "node --test tests/run-tests.mjs",
+    "deploy:rules": "npx --yes firebase-tools deploy --only firestore:rules --project natureforce-65cdc",
     "set-admin": "node scripts/set-admin-claim.cjs"
   },
   "dependencies": {

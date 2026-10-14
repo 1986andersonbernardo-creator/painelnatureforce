@@ -1,27 +1,50 @@
-/* ===== RESET ===== */
-*, *::before, *::after { box-sizing: border-box; }
-* { margin: 0; padding: 0; border: 0; }
+*, *::before, *::after {
+  box-sizing: border-box;
+}
 
 html {
   scroll-behavior: smooth;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-size-adjust: 100%;
 }
 
 body {
   min-height: 100vh;
-  font-family: 'Inter', system-ui, sans-serif;
-  background: var(--color-bg, #f8fafc);
-  color: var(--color-text, #0f172a);
-  font-size: 16px;
-  line-height: 1.5;
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
   -webkit-tap-highlight-color: transparent;
 }
 
-#root { min-height: 100vh; }
+button, input, select, textarea {
+  font: inherit;
+}
 
-a { color: inherit; text-decoration: none; }
-button { cursor: pointer; }
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-focus);
+  outline-offset: 3px;
+}
+
+#root {
+  min-height: 100vh;
+}
 
 .visually-hidden {
   position: absolute !important;
@@ -35,13 +58,15 @@ button { cursor: pointer; }
   border: 0 !important;
 }
 
-.hidden { display: none !important; }
+.hidden {
+  display: none !important;
+}
 
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
   z-index: 50;
+  background: rgba(13, 27, 20, 0.54);
 }
 
 .loading-dots {
@@ -53,7 +78,7 @@ button { cursor: pointer; }
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--primary, #10b981);
+  background: var(--color-brand);
   animation: pulse 1.2s ease-in-out infinite both;
 }
 
@@ -61,16 +86,24 @@ button { cursor: pointer; }
 .loading-dots span:nth-child(2) { animation-delay: 150ms; }
 .loading-dots span:nth-child(3) { animation-delay: 300ms; }
 
-/* ===== Loading spinner ===== */
 .loading-spinner {
   width: 40px;
   height: 40px;
-  border: 4px solid rgba(16, 185, 129, 0.2);
-  border-top-color: var(--primary, #10b981);
+  border: 4px solid var(--color-brand-soft);
+  border-top-color: var(--color-brand);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -5,6 +5,28 @@ Este guia resolve definitivamente a mensagem:
 > "Sessão administrativa SEM acesso ao banco compartilhado. As alterações ficam
 > salvas apenas neste navegador..."
 
+## Administrador master e criação de usuários
+
+O administrador master é `thyagopatriota2020@gmail.com`. Faça login com esta
+conta no Firebase Authentication para operar em qualquer dispositivo. Na tela
+**Usuários**, administradores operacionais podem consultar os perfis, mas apenas
+o master pode criar ou remover usuários. Essa restrição existe tanto na
+interface quanto nas Firestore Security Rules (`isMasterAdmin()`); não depende
+de um perfil salvo pelo navegador.
+
+Cadastre esta conta em **Firebase Console → Authentication → Users** caso ainda
+não exista. Depois publique as rules:
+
+```powershell
+npx --yes firebase-tools login
+npm run deploy:rules
+```
+
+O endereço do master é uma identidade fixa das rules e permanece autorizado
+mesmo se `VITE_ADMIN_EMAILS` for configurado para outros administradores. A
+variável de ambiente pode listar administradores operacionais; nunca a use
+como substituta das Firestore Security Rules.
+
 ## Por que isso acontece
 
 O login administrativo valida as credenciais **no Firebase Authentication**
@@ -12,6 +34,40 @@ O login administrativo valida as credenciais **no Firebase Authentication**
 Sem uma sessão Firebase autenticada, o Firestore nega toda escrita
 (`request.auth == null` nas Security Rules) e o sistema só consegue salvar os
 dados no cache local do navegador.
+
+Para que os mesmos dados apareçam em outros dispositivos, o login precisa ser
+feito com a conta administrativa do **Firebase Authentication**. O cache local
+do navegador não é compartilhado. As regras do projeto são associadas ao
+projeto Firebase padrão `natureforce-65cdc`; se `VITE_FIREBASE_PROJECT_ID` foi
+configurado no deploy, publique as regras também nesse projeto.
+
+## Erro de acesso à coleção `preCadastros`
+
+`firestore.rules` já restringe essa coleção a administradores (`isAdmin()`).
+Não substitua essa regra por `allow read, write: if true`: isso exporia dados
+de clientes sem autenticação. O erro normalmente significa que as regras locais
+ainda não foram publicadas no **mesmo projeto** usado pelo site, ou que a conta
+Firebase conectada não está autorizada.
+
+Na raiz do projeto, autentique o Firebase CLI (não precisa instalá-lo
+globalmente) e publique somente as regras do Firestore:
+
+```bash
+npx --yes firebase-tools login
+npm run deploy:rules
+```
+
+O `firebase.json` deste repositório aponta a publicação para `firestore.rules`;
+`.firebaserc` define o projeto padrão. Alternativamente, no Console Firebase,
+abra o projeto correto → **Firestore Database → Rules**, publique o conteúdo
+de `firestore.rules` e verifique a mensagem de publicação concluída.
+
+Após publicar, confira se o e-mail exibido no erro é um dos autorizados nas
+regras (`thyagopatriota2020@gmail.com`, `guladpizza@gmail.com` ou
+`1986.andersonbernardo@gmail.com`). Para autorizar outra conta operacional com
+segurança, atribua-lhe a custom claim `admin: true` com o script abaixo; isso
+não concede permissão para criar/remover perfis administrativos. Em seguida,
+saia e entre novamente para renovar o token.
 
 ## Passo a passo no Firebase Console
 
@@ -21,15 +77,18 @@ dados no cache local do navegador.
 
 2. **Criar a conta do administrador**
    - **Authentication → Users → Add user**
-   - E-mail: o MESMO e-mail usado em `/admin/login` (padrão: `guladpizza@gmail.com`)
+   - E-mail: `thyagopatriota2020@gmail.com` para o master.
    - Senha: a MESMA senha usada no login do sistema
    - IMPORTANTE: se a conta já existir com outro e-mail, use o e-mail que está
      na lista de `firestore.rules` (função `isAdmin()`), ou atualize a lista.
 
-3. **Publicar as Security Rules atualizadas** (obrigatório depois das últimas
-   alterações — agora existem regras para `usuarios` e `logs`)
-   - Console do Firebase → **Firestore Database → Rules**
-   - Cole o conteúdo de `firestore.rules` deste projeto → **Publish**
+3. **Publicar as Security Rules**
+   - Na raiz do projeto, execute `npx --yes firebase-tools login` (uma vez) e
+     `npm run deploy:rules`; ou
+   - Console do Firebase → **Firestore Database → Rules** → publique o
+     conteúdo de `firestore.rules` deste projeto.
+   - Confirme que o projeto do Console corresponde ao `projectId` usado pelo
+     site (`VITE_FIREBASE_PROJECT_ID` ou `natureforce-65cdc`).
 
 4. **Entrar novamente**
    - Abra `/admin/login`, entre com o mesmo e-mail e senha.

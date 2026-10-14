@@ -3,8 +3,8 @@ rules_version = '2';
 // ==================== REGRAS DE SEGURANÇA — NATURE FORCE ====================
 // Princípio: cada cliente só acessa seus próprios dados (cliente A NUNCA vê cliente B).
 // O UID do Firebase Authentication é o identificador principal.
-// Administradores têm acesso amplo para gestão (autorização por custom claim
-// `admin: true` OU e-mail na lista de administradores — ambos suportados).
+// Administradores têm acesso amplo para gestão (custom claim `admin: true` ou
+// e-mail operacional); apenas o master pode criar/remover perfis administrativos.
 //
 // Modelo em 3 níveis: clientes → unidades (UC) → faturas.
 // - A UC é o principal identificador de uma fatura.
@@ -12,6 +12,12 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // Administrador master: identidade fixa verificada pelo token assinado do Auth.
+    function isMasterAdmin() {
+      return request.auth != null &&
+             request.auth.token.get('email', '') == 'thyagopatriota2020@gmail.com';
+    }
 
     // Helper: é um usuário autenticado administrador?
     // Suporta as duas formas de autorização:
@@ -21,8 +27,9 @@ service cloud.firestore {
     // administrador fica sem permissão de escrita e as alterações não persistem.
     function isAdmin() {
       return request.auth != null &&
-             (request.auth.token.admin == true ||
-              request.auth.token.email in [
+             (isMasterAdmin() ||
+              request.auth.token.get('admin', false) == true ||
+              request.auth.token.get('email', '') in [
                 'guladpizza@gmail.com',
                 '1986.andersonbernardo@gmail.com'
               ]);
@@ -65,7 +72,9 @@ service cloud.firestore {
 
       allow create: if isOwner(request.resource.data.clienteId) || isAdmin();
 
-      allow update: if isOwner(resource.data.clienteId) || isAdmin();
+      allow update: if isAdmin() ||
+                    (isOwner(resource.data.clienteId) &&
+                     request.resource.data.clienteId == resource.data.clienteId);
 
       allow delete: if isAdmin();
     }
@@ -79,7 +88,9 @@ service cloud.firestore {
 
       allow create: if isOwner(request.resource.data.clienteId) || isAdmin();
 
-      allow update: if isOwner(resource.data.clienteId) || isAdmin();
+      allow update: if isAdmin() ||
+                    (isOwner(resource.data.clienteId) &&
+                     request.resource.data.clienteId == resource.data.clienteId);
 
       allow delete: if isAdmin();
     }
@@ -110,7 +121,9 @@ service cloud.firestore {
 
       allow create: if isOwner(request.resource.data.clienteId);
 
-      allow update: if isOwner(resource.data.clienteId) || isAdmin();
+      allow update: if isAdmin() ||
+                    (isOwner(resource.data.clienteId) &&
+                     request.resource.data.clienteId == resource.data.clienteId);
 
       allow delete: if false;
     }
@@ -121,7 +134,9 @@ service cloud.firestore {
 
       allow create: if isOwner(request.resource.data.clienteId);
 
-      allow update: if isOwner(resource.data.clienteId) || isAdmin();
+      allow update: if isAdmin() ||
+                    (isOwner(resource.data.clienteId) &&
+                     request.resource.data.clienteId == resource.data.clienteId);
 
       allow delete: if false;
     }
@@ -132,7 +147,9 @@ service cloud.firestore {
 
       allow create: if isOwner(request.resource.data.clienteId);
 
-      allow update: if isOwner(resource.data.clienteId) || isAdmin();
+      allow update: if isAdmin() ||
+                    (isOwner(resource.data.clienteId) &&
+                     request.resource.data.clienteId == resource.data.clienteId);
 
       allow delete: if false;
     }
@@ -141,9 +158,17 @@ service cloud.firestore {
     // Coleção gerenciada pelo painel administrativo (tela de Usuários).
     // A SENHA nunca é gravada aqui (credenciais vivem no Firebase Auth) —
     // ver usuarioParaBanco() em services/persistencia.js.
-    // Somente administradores leem/gravam: é o cadastro que define perfis.
+    // Todos os administradores leem a lista; apenas o master pode criar/remover
+    // perfis. Administradores operacionais só podem atualizar seus próprios
+    // metadados sem trocar e-mail ou perfil.
     match /usuarios/{usuarioId} {
-      allow read, write: if isAdmin();
+      allow read: if isAdmin();
+      allow create, delete: if isMasterAdmin();
+      allow update: if isMasterAdmin() ||
+                    (isAdmin() &&
+                     resource.data.email == request.auth.token.get('email', '') &&
+                     request.resource.data.email == resource.data.email &&
+                     request.resource.data.perfil == resource.data.perfil);
     }
 
     // ==================== LOGS DE AUDITORIA ====================

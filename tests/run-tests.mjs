@@ -38,6 +38,22 @@ import {
   normalizarVencimento,
   vencimentoValido,
 } from '../src/services/faturaNormalizacao.js'
+import {
+  ADMIN_EMAILS,
+  MASTER_ADMIN_EMAIL,
+  ehEmailAdminMaster,
+  podeAdministrar,
+} from '../src/services/adminAccess.js'
+
+test('Administrador master: só a conta definida pode gerir usuários', () => {
+  assert.equal(MASTER_ADMIN_EMAIL, 'thyagopatriota2020@gmail.com')
+  assert.equal(ehEmailAdminMaster(' ThyagoPatriota2020@gmail.com '), true)
+  assert.equal(ehEmailAdminMaster('guladpizza@gmail.com'), false)
+  assert.equal(ADMIN_EMAILS.includes(MASTER_ADMIN_EMAIL), true)
+  assert.equal(podeAdministrar({ email: MASTER_ADMIN_EMAIL }), true)
+  assert.equal(podeAdministrar({ email: 'operador@natureforce.com' }), false)
+  assert.equal(podeAdministrar({ claimAdmin: true }), true)
+})
 
 // ==================== Cenário-base ====================
 const clientes = [

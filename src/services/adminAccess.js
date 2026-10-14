@@ -17,19 +17,30 @@
 
 import { normalizarEmail } from './persistencia.js'
 
-// E-mail do administrador provisionado no Firebase Authentication e autorizado
-// nas Security Rules. Fallback: mesma conta usada pelo login administrativo.
-// A lista inclui os administradores deste projeto e ESPELHA exatamente a lista
-// de `firestore.rules`/`storage.rules` (função isAdmin()).
+export const MASTER_ADMIN_EMAIL = 'thyagopatriota2020@gmail.com'
+
+const ADMIN_EMAILS_PADRAO = 'guladpizza@gmail.com,1986.andersonbernardo@gmail.com'
+
+// O master permanece autorizado mesmo quando a lista de administradores é
+// sobrescrita em deploy. Esta lista espelha os administradores operacionais
+// de firestore.rules/storage.rules; o master é reconhecido separadamente.
 export const ADMIN_EMAILS = Object.freeze(
-  String(
-    (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_EMAILS) ||
-      'guladpizza@gmail.com,1986.andersonbernardo@gmail.com',
-  )
-    .split(',')
-    .map((email) => normalizarEmail(email))
-    .filter(Boolean),
+  Array.from(
+    new Set([
+      MASTER_ADMIN_EMAIL,
+      ...String(
+        (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_EMAILS) ||
+          ADMIN_EMAILS_PADRAO,
+      )
+        .split(',')
+        .map((email) => normalizarEmail(email))
+        .filter(Boolean),
+    ]),
+  ),
 )
+
+export const ehEmailAdminMaster = (email) =>
+  normalizarEmail(email) === MASTER_ADMIN_EMAIL
 
 /**
  * E-mail pertence à lista de administradores?
@@ -55,3 +66,12 @@ export const podeAdministrar = ({ email = '', claimAdmin = false } = {}) =>
  * @returns {boolean}
  */
 export const usuarioFirebaseEhAdmin = (usuario) => podeAdministrar(usuario)
+
+/**
+ * O usuário autenticado é o administrador master, único autorizado a criar
+ * ou remover perfis administrativos.
+ * @param {{email?:string}} usuario
+ * @returns {boolean}
+ */
+export const usuarioFirebaseEhAdminMaster = ({ email = '' } = {}) =>
+  ehEmailAdminMaster(email)

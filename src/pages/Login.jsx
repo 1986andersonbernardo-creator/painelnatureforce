@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { recuperarSenha } from '../firebase/auth'
-import logo from '../assets/logo.png'
+import logo from '../../img/logo.png'
 
 export function LoginLayout({ children }) {
   return (
@@ -124,9 +124,7 @@ export function LoginCliente() {
 
         {error ? <p className="login-error">{error}</p> : null}
         {mensagemRecuperacao ? (
-          <p style={{ color: '#166534', background: '#f0fdf4', padding: '10px', borderRadius: '8px' }}>
-            {mensagemRecuperacao}
-          </p>
+          <p className="login-success">{mensagemRecuperacao}</p>
         ) : null}
 
         <button type="submit" className="primary-button large-btn" disabled={loading}>
@@ -154,7 +152,7 @@ export function LoginAdmin() {
   const { loginAdmin } = useAuth()
   const navigate = useNavigate()
   const [form, setForm] = useState({
-    email: 'guladpizza@gmail.com',
+    email: 'thyagopatriota2020@gmail.com',
     password: '',
   })
   const [error, setError] = useState('')
@@ -195,7 +193,7 @@ export function LoginAdmin() {
             onChange={(event) =>
               setForm((current) => ({ ...current, email: event.target.value }))
             }
-            placeholder="guladpizza@gmail.com"
+            placeholder="thyagopatriota2020@gmail.com"
           />
         </label>
 
@@ -232,7 +230,7 @@ export function ProtectedRoute({ children, tipo }) {
   if (authLoading) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-        <div style={{ textAlign: 'center', color: '#64748b' }}>
+        <div style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>
           <div className="loading-spinner" style={{ margin: '0 auto 16px' }} />
           <p>Verificando sessão...</p>
         </div>
@@ -252,7 +250,7 @@ export function ProtectedRoute({ children, tipo }) {
       <div className="login-card-wrap" style={{ margin: '40px auto' }}>
         <div className="login-card" style={{ minWidth: '320px' }}>
           <h2>Acesso negado</h2>
-          <p style={{ color: '#64748b', margin: '12px 0' }}>
+          <p style={{ color: 'var(--color-text-muted)', margin: '12px 0' }}>
             Você não tem permissão para acessar esta área.
           </p>
           <Link

@@ -15,7 +15,7 @@ const ClienteDashboard = lazy(() =>
 function Carregando() {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
-      <div style={{ textAlign: 'center', color: '#64748b' }}>
+      <div style={{ textAlign: 'center', color: 'var(--color-text-muted)' }}>
         <div className="loading-spinner" style={{ margin: '0 auto 16px' }} />
         <p>Carregando...</p>
       </div>

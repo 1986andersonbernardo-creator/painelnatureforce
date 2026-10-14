@@ -189,14 +189,14 @@ export const setIndiceSync = (indice) => {
  * existe para permitir o primeiro acesso/offline e a tela de Usuários.
  *
  * Configurável por ambiente:
- *   VITE_ADMIN_EMAIL="guladpizza@gmail.com"
+ *   VITE_ADMIN_EMAIL="thyagopatriota2020@gmail.com"
  *   VITE_ADMIN_PASSWORD="..."
  */
 const BOOTSTRAP_ADMIN = {
   nome: 'Administrador',
   email: String(
     (typeof import.meta !== 'undefined' && import.meta.env?.VITE_ADMIN_EMAIL) ||
-      'guladpizza@gmail.com',
+      'thyagopatriota2020@gmail.com',
   )
     .trim()
     .toLowerCase(),

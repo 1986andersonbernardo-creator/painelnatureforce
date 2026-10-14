@@ -10,6 +10,7 @@ import { STATUS_FATURA, MOTIVO_REVISAO, ROTULO_MOTIVO_REVISAO } from '../../serv
 import { validarArquivoPDF } from '../../services/pdfValidacao'
 // Regra única de vínculo cliente ↔ registro (id local OU UID do Firebase).
 import { registroPertenceAoCliente } from '../../services/persistencia'
+import { ehEmailAdminMaster } from '../../services/adminAccess'
 // Atendimento: as solicitações enviadas pelos clientes precisam chegar à equipe.
 import { observarTodosChamados, atualizarChamado } from '../../firebase/firestore'
 
@@ -2309,6 +2310,7 @@ function RevisoesSection() {
 /* ======================== SEÇÃO USUÁRIOS ======================== */
 function UsuariosSection() {
   const { getUsuarios, addUsuario, removeUsuario, session } = useAuth()
+  const isMaster = ehEmailAdminMaster(session?.email)
   const [usuarios, setUsuarios] = useDadosSincronizados(getUsuarios, getUsuarios())
   const [showForm, setShowForm] = useState(false)
   const [mensagem, setMensagem] = useState('')
@@ -2335,16 +2337,16 @@ function UsuariosSection() {
           <span className="eyebrow">Perfis de acesso</span>
           <h3>Usuários administrativos ({usuarios.length})</h3>
         </div>
-        {session?.perfil === 'administrador' && (
+        {isMaster && (
           <button type="button" className="primary-button" onClick={() => setShowForm((s) => !s)}>
             {showForm ? 'Fechar' : '+ Novo usuário'}
           </button>
         )}
       </div>
 
-      {session?.perfil !== 'administrador' && (
+      {!isMaster && (
         <p style={{ color: '#b45309', background: '#fef3c7', padding: '10px', borderRadius: '8px', marginBottom: '12px' }}>
-          Somente administradores podem gerenciar usuários.
+          Acesso somente para consulta. Apenas o administrador master pode criar ou remover usuários.
         </p>
       )}
 
@@ -2354,7 +2356,7 @@ function UsuariosSection() {
         </p>
       )}
 
-      {showForm && session?.perfil === 'administrador' && (
+      {showForm && isMaster && (
         <form onSubmit={handleSubmit} style={{ background: '#f8fafc', padding: '16px', borderRadius: '12px', marginBottom: '16px' }}>
           <div className="profile-grid">
             <div className="field">
@@ -2388,9 +2390,10 @@ function UsuariosSection() {
           <div>
             <strong>{u.nome}</strong>
             {u.perfil === 'administrador' ? <span className="tag tag-success">Admin</span> : <span className="tag tag-neutral">Operador</span>}
+            {ehEmailAdminMaster(u.email) && <span className="tag tag-warning">Master</span>}
             <small style={{ display: 'block', color: '#64748b' }}>{u.email} · Criado em {u.criadoEm}</small>
           </div>
-          {session?.perfil === 'administrador' && u.id !== session?.usuarioId && (
+          {isMaster && u.id !== session?.usuarioId && (
             <button type="button" onClick={() => { removeUsuario(u.id); refresh(); }}>
               Remover
             </button>
