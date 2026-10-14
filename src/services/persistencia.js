@@ -155,6 +155,15 @@ export const itemParaBanco = (colecao, item) => {
 }
 
 /**
+ * Resolve o vínculo de uma fatura: UID Firebase quando o cliente já tem conta,
+ * mantendo o id local como fallback até o provisionamento do acesso.
+ * @param {{id?:string|number, uid?:string}} cliente
+ * @returns {string|null}
+ */
+export const clienteIdParaFatura = (cliente) =>
+  String(cliente?.uid || cliente?.id || '') || null
+
+/**
  * Payload de uma COLEÇÃO inteira para o banco central (mesma sanitização).
  * @param {string} colecao
  * @param {Array} itens

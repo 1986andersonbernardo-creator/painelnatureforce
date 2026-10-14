@@ -218,6 +218,62 @@ export function AuthProvider({ children }) {
     [podeEscreverCompartilhado, registrarFalhaSync, registrarSucessoSync],
   )
 
+  const sincronizarVinculoCliente = useCallback(
+    async (cliente, uid) => {
+      if (!podeEscreverCompartilhado || !cliente || !uid) return { ok: false }
+
+      const clientesAntes = getStore('clientes')
+      const unidadesAntes = getStore('unidades')
+      const faturasAntes = getStore('faturas')
+      const vinculo = propagarVinculoCliente({
+        clientes: clientesAntes,
+        unidades: unidadesAntes,
+        faturas: faturasAntes,
+        cliente,
+        uid,
+      })
+      const unidadesAlteradas = vinculo.unidades.filter(
+        (unidade, index) => String(unidadesAntes[index]?.clienteId) !== String(unidade.clienteId),
+      )
+      const faturasAlteradas = vinculo.faturas.filter(
+        (fatura, index) => String(faturasAntes[index]?.clienteId) !== String(fatura.clienteId),
+      )
+
+      if (unidadesAlteradas.length === 0 && faturasAlteradas.length === 0) {
+        return { ok: true, unidades: 0, faturas: 0 }
+      }
+
+      setStore('clientes', vinculo.clientes)
+      setStore('unidades', vinculo.unidades)
+      setStore('faturas', vinculo.faturas)
+      bumpVersao()
+
+      const registros = [
+        ...unidadesAlteradas.map((item) => ['unidades', item]),
+        ...faturasAlteradas.map((item) => ['faturas', item]),
+      ]
+      const resultados = await Promise.all(
+        registros.map(([colecao, item]) =>
+          salvarDocumento(colecao, idDocumento(colecao, item), item),
+        ),
+      )
+      const falha = resultados.find((resultado) => !resultado.ok)
+      if (falha) {
+        registrarFalhaSync(
+          'Não foi possível atualizar o vínculo das faturas e unidades ao UID do cliente.',
+          falha.codigo,
+        )
+        return { ok: false, unidades: unidadesAlteradas.length, faturas: faturasAlteradas.length }
+      }
+
+      registrarSucessoSync(
+        `Vínculo do cliente sincronizado: ${unidadesAlteradas.length} unidade(s), ${faturasAlteradas.length} fatura(s)`,
+      )
+      return { ok: true, unidades: unidadesAlteradas.length, faturas: faturasAlteradas.length }
+    },
+    [podeEscreverCompartilhado, bumpVersao, registrarFalhaSync, registrarSucessoSync],
+  )
+
   /**
    * Grava o log no cache local E espelha no banco central — o histórico de
    * auditoria é o mesmo em todos os dispositivos.
@@ -366,12 +422,31 @@ export function AuthProvider({ children }) {
       aplicarDadosRemotos(colecao, resultado.data)
     }
 
+    const falhasVinculo = []
+    if (!falhaCritica) {
+      for (const cliente of getStore('clientes').filter((item) => item.uid)) {
+        const resultadoVinculo = await sincronizarVinculoCliente(cliente, cliente.uid)
+        if (!resultadoVinculo.ok) falhasVinculo.push(resultadoVinculo)
+      }
+    }
+
     setIndiceSync(indiceSyncRef.current)
     bumpVersao()
 
     if (falhaCritica) {
       registrarFalhaSync(falhaCritica.message, falhaCritica.codigo)
       return { ok: false, message: falhaCritica.message, falhas }
+    }
+
+    if (falhasVinculo.length > 0) {
+      registrarFalhaSync(
+        'Não foi possível vincular todas as faturas e unidades aos UIDs dos clientes.',
+      )
+      return {
+        ok: false,
+        message: 'Não foi possível vincular todas as faturas e unidades aos UIDs dos clientes.',
+        falhas: falhasVinculo,
+      }
     }
 
     registrarSucessoSync('dados compartilhados carregados do Firestore')
@@ -382,6 +457,7 @@ export function AuthProvider({ children }) {
     bumpVersao,
     registrarFalhaSync,
     registrarSucessoSync,
+    sincronizarVinculoCliente,
   ])
 
   // Hidratação automática ao entrar na Área Administrativa autenticada
@@ -477,6 +553,9 @@ export function AuthProvider({ children }) {
       setStore('unidades', vinculo.unidades)
       setStore('faturas', vinculo.faturas)
       bumpVersao()
+      if (podeEscreverCompartilhado) {
+        sincronizarVinculoCliente(vinculo.cliente, uid)
+      }
 
       // Espelha o cadastro (com o UID) no banco compartilhado. O próprio cliente
       // autenticado pode gravar o seu documento (isOwner nas security rules).
@@ -506,7 +585,13 @@ export function AuthProvider({ children }) {
 
       return vinculo.cliente
     },
-    [bumpVersao, registrarFalhaSync, logar],
+    [
+      bumpVersao,
+      podeEscreverCompartilhado,
+      registrarFalhaSync,
+      logar,
+      sincronizarVinculoCliente,
+    ],
   )
 
   // Observa o estado de autenticação do Firebase

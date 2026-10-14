@@ -11,8 +11,8 @@ atendimento e cadastro — com processamento automático de PDFs de fatura.
 | Front-end | React 19 + Vite 8 + react-router-dom 7 |
 | Banco / autenticação | Firebase (Firestore + Authentication) |
 | PDF | pdfjs-dist (build principal + fallback legacy) |
-| Cache local | localStorage (dados) + IndexedDB (PDFs importados) |
-| Lint / testes | oxlint · `node --test` (31 testes) |
+| Cache local | localStorage (cache de dados) + Firebase Storage (PDFs compartilhados) |
+| Lint / testes | oxlint · `node --test` |
 | Deploy | Vercel (rewrites de SPA em `vercel.json`) |
 
 ## Rodando localmente
@@ -62,8 +62,11 @@ As `onSnapshot` reconciliam o cache com o banco em tempo real.
 - `firestore.rules` — isolamento por UID: um cliente só lê/grava os próprios
   documentos; administrador tem acesso amplo (custom claim `admin` ou e-mail na
   allowlist).
-- `storage.rules` — PDFs por cliente (uso futuro; hoje os PDFs ficam no
-  navegador do admin, em IndexedDB).
+- `storage.rules` — PDFs privados por UID do cliente; uploads administrativos
+  limitados a arquivos PDF de até 20 MB.
+- PDFs enviados antes da integração com o Storage continuam somente no
+  IndexedDB do navegador de origem. Reenvie o mesmo PDF no painel para
+  sincronizar uma fatura já cadastrada.
 - **Credenciais nunca são espelhadas no banco**: `senha`/`senhaAcesso` são
   removidas do payload por `itemParaBanco()` antes de qualquer gravação.
 - Após mudanças nas regras, execute `npx --yes firebase-tools login` uma vez

@@ -3,7 +3,10 @@ import { useAuth } from '../../context/AuthContext'
 import { obterArquivo, getStore, setStore } from '../../store/db'
 import logo from '../../assets/logo.png'
 // Isolamento: SOMENTE as faturas deste cliente (id local, UID ou UCs dele).
-import { filtrarFaturasDoCliente } from '../../services/persistencia'
+import {
+  filtrarFaturasDoCliente,
+  ordenarPorCompetencia,
+} from '../../services/persistencia'
 import {
   criarChamado,
   atualizarCliente,
@@ -12,6 +15,7 @@ import {
   observarClientePorUid,
   observarChamadosDoCliente,
 } from '../../firebase/firestore'
+import { obterUrlPdfFatura } from '../../firebase/storage'
 
 const formatCurrency = (value) =>
   new Intl.NumberFormat('pt-BR', {
@@ -132,12 +136,14 @@ export function ClienteDashboard() {
 
   // Faturas apenas deste cliente (isolamento por id local, UID ou UCs dele) e
   // já PUBLICADAS pelo administrador (status = 'disponivel').
-  const faturas = filtrarFaturasDoCliente({
-    faturas: faturasBase,
-    clienteId: uid,
-    uids: uidFirebase ? [uidFirebase] : [],
-    ucs: unidades.map((u) => u.numeroUC),
-  }).filter((f) => f.status === 'disponivel')
+  const faturas = ordenarPorCompetencia(
+    filtrarFaturasDoCliente({
+      faturas: faturasBase,
+      clienteId: uid,
+      uids: uidFirebase ? [uidFirebase] : [],
+      ucs: unidades.map((u) => u.numeroUC),
+    }).filter((f) => f.status === 'disponivel'),
+  )
 
   // Métricas do cliente
   const consumoAtual = faturas[0]?.consumo || 0
@@ -430,16 +436,18 @@ export function ClienteDashboard() {
                             type="button"
                             onClick={async () => {
                               try {
-                                const data = await obterArquivo(fat.id)
+                                const data = fat.storagePath
+                                  ? await obterUrlPdfFatura(fat.storagePath)
+                                  : await obterArquivo(fat.id)
                                 if (data) {
                                   window.open(data, '_blank')
                                 } else {
                                   alert(
-                                    'O PDF original não está disponível neste dispositivo. O arquivo é guardado no navegador do computador que importou a fatura (os dados da fatura em si estão no banco central). Solicite o PDF pelo atendimento.',
+                                    'O PDF desta fatura ainda não foi enviado ao armazenamento compartilhado. Peça à equipe administrativa para reenviar o arquivo.',
                                   )
                                 }
-                              } catch {
-                                alert('Arquivo não encontrado neste dispositivo.')
+                              } catch (error) {
+                                alert(error?.message || 'Não foi possível abrir o PDF desta fatura.')
                               }
                             }}
                           >
@@ -449,7 +457,9 @@ export function ClienteDashboard() {
                             type="button"
                             onClick={async () => {
                               try {
-                                const data = await obterArquivo(fat.id)
+                                const data = fat.storagePath
+                                  ? await obterUrlPdfFatura(fat.storagePath)
+                                  : await obterArquivo(fat.id)
                                 if (data) {
                                   const link = document.createElement('a')
                                   link.href = data
@@ -457,11 +467,11 @@ export function ClienteDashboard() {
                                   link.click()
                                 } else {
                                   alert(
-                                    'O PDF original não está disponível neste dispositivo: ele é guardado no navegador do computador que importou a fatura. Solicite o PDF pelo atendimento.',
+                                    'O PDF desta fatura ainda não foi enviado ao armazenamento compartilhado. Peça à equipe administrativa para reenviar o arquivo.',
                                   )
                                 }
-                              } catch {
-                                alert('Arquivo não encontrado.')
+                              } catch (error) {
+                                alert(error?.message || 'Não foi possível baixar o PDF desta fatura.')
                               }
                             }}
                           >

@@ -18,10 +18,13 @@ service firebase.storage {
               ]);
     }
 
-    // Cliente autenticado pode ler apenas os arquivos de sua própria pasta (clienteId == uid)
+    // PDFs privados por UID, acessíveis ao cliente dono e à equipe administrativa.
     match /faturas/{clienteId}/{unidadeConsumidoraId}/{arquivo} {
-      allow read: if request.auth != null && request.auth.uid == clienteId;
-      allow write: if isAdmin();
+      allow read: if (request.auth != null && request.auth.uid == clienteId) || isAdmin();
+      allow create, update: if isAdmin() &&
+                            request.resource.size <= 20 * 1024 * 1024 &&
+                            request.resource.contentType == 'application/pdf';
+      allow delete: if isAdmin();
     }
 
     // Negação padrão para qualquer outro caminho

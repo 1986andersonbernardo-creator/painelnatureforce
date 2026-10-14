@@ -9,10 +9,14 @@ import { STATUS_FATURA, MOTIVO_REVISAO, ROTULO_MOTIVO_REVISAO } from '../../serv
 // Validação por CONTEÚDO (assinatura "%PDF-") — não por MIME.
 import { validarArquivoPDF } from '../../services/pdfValidacao'
 // Regra única de vínculo cliente ↔ registro (id local OU UID do Firebase).
-import { registroPertenceAoCliente } from '../../services/persistencia'
+import {
+  clienteIdParaFatura,
+  registroPertenceAoCliente,
+} from '../../services/persistencia'
 import { ehEmailAdminMaster } from '../../services/adminAccess'
 // Atendimento: as solicitações enviadas pelos clientes precisam chegar à equipe.
 import { observarTodosChamados, atualizarChamado } from '../../firebase/firestore'
+import { enviarPdfFatura } from '../../firebase/storage'
 
 const formatCurrency = (value) =>
   new Intl.NumberFormat('pt-BR', {
@@ -1223,29 +1227,7 @@ function FaturasSection() {
           adicionarPasso(key, `✓ UC identificada: ${ucExtraida}`)
         }
 
-        // ===== 5. Verifica duplicidade da fatura =====
-        const chaveDedupe = gerarChaveDedupe({
-          uc: ucExtraida,
-          referencia: normalizarRef(componentes.referencia),
-          numeroNota: componentes.numeroNota,
-        })
-        const faturasAtuais = getFaturas()
-        const duplicada = encontrarFaturaDuplicada(faturasAtuais, { hashArquivo, chaveDedupe })
-        if (duplicada) {
-          atualizarItem(key, {
-            status: 'DUPLICADA',
-            cliente: duplicada.clienteNome || '—',
-            erro: `Fatura já existe no sistema (${duplicada.arquivo}).`,
-          })
-          logar(
-            'FATURA_DUPLICADA',
-            `Fatura ${file.name} duplicada de ${duplicada.arquivo}`,
-            session?.nome || 'Sistema',
-          )
-          continue
-        }
-
-        // ===== 6. Identifica UC e cliente (prioridade: UC → cliente vinculado) =====
+        // ===== 5. Identifica UC e cliente (prioridade: UC → cliente vinculado) =====
         let clienteDestino = null
         let unidadeDestino = null
         const decisao = identificarFatura({
@@ -1256,6 +1238,61 @@ function FaturasSection() {
         if (decisao.decisao === DECISAO.PROCESSADO) {
           clienteDestino = decisao.cliente
           unidadeDestino = decisao.unidade
+        }
+
+        // ===== 6. Verifica duplicidade da fatura =====
+        const chaveDedupe = gerarChaveDedupe({
+          uc: ucExtraida,
+          referencia: normalizarRef(componentes.referencia),
+          numeroNota: componentes.numeroNota,
+        })
+        const faturasAtuais = getFaturas()
+        const duplicada = encontrarFaturaDuplicada(faturasAtuais, { hashArquivo, chaveDedupe })
+        if (duplicada) {
+          let aviso = `Fatura já existe no sistema (${duplicada.arquivo}).`
+          if (clienteDestino?.uid && !duplicada.storagePath) {
+            const faturaId =
+              duplicada.idFatura ||
+              gerarIdFatura({
+                uc: duplicada.uc || ucExtraida,
+                referencia: duplicada.referencia || normalizarRef(componentes.referencia),
+                numeroNota: duplicada.numeroNota || componentes.numeroNota,
+                hashArquivo: duplicada.hashArquivo || hashArquivo,
+              })
+            const envio = await enviarPdfFatura({
+              clienteUid: clienteDestino.uid,
+              uc: duplicada.uc || unidadeDestino?.numeroUC || ucExtraida,
+              faturaId,
+              arquivo: file,
+            })
+            if (envio.ok) {
+              updateFatura(duplicada.id, {
+                clienteId: clienteDestino.uid,
+                clienteIdLocal: clienteDestino.id,
+                storagePath: envio.caminho,
+                erroPdfCompartilhado: null,
+              })
+              aviso = `Fatura já cadastrada. PDF sincronizado para ${clienteDestino.nome}.`
+            } else {
+              updateFatura(duplicada.id, {
+                clienteId: clienteDestino.uid,
+                clienteIdLocal: clienteDestino.id,
+                erroPdfCompartilhado: envio.message,
+              })
+              aviso = `${aviso} O PDF continua sem cópia compartilhada: ${envio.message}`
+            }
+          }
+          atualizarItem(key, {
+            status: 'DUPLICADA',
+            cliente: duplicada.clienteNome || '—',
+            erro: aviso,
+          })
+          logar(
+            'FATURA_DUPLICADA',
+            `Fatura ${file.name} duplicada de ${duplicada.arquivo}`,
+            session?.nome || 'Sistema',
+          )
+          continue
         }
 
         // ===== 7. Registra o processamento no Firestore (não bloqueia) =====
@@ -1302,9 +1339,17 @@ function FaturasSection() {
         }
 
         // ===== 9. Monta os dados da fatura =====
+        const dadosIdentidadeFatura = {
+          uc: unidadeDestino?.numeroUC || ucExtraida || componentes.uc,
+          referencia: normalizarRef(componentes.referencia),
+          numeroNota: componentes.numeroNota,
+          hashArquivo,
+        }
+        const idFatura = gerarIdFatura(dadosIdentidadeFatura)
         const dadosFatura = {
           id,
-          clienteId: clienteDestino?.id || null,
+          clienteId: clienteIdParaFatura(clienteDestino),
+          ...(clienteDestino?.uid ? { clienteIdLocal: clienteDestino.id } : {}),
           ucId: unidadeDestino?.id || null,
           arquivo: file.name,
           clienteNome: clienteDestino?.nome || componentes.cliente || null,
@@ -1330,18 +1375,8 @@ function FaturasSection() {
           chaveDedupe,
           numeroNota: componentes.numeroNota || null,
           // Idempotência forte (UC|referencia|nota#hash) — impede duplicação no Firestore
-          chaveIdempotencia: montarChaveIdempotencia({
-            uc: unidadeDestino?.numeroUC || ucExtraida || componentes.uc,
-            referencia: normalizarRef(componentes.referencia),
-            numeroNota: componentes.numeroNota,
-            hashArquivo,
-          }),
-          idFatura: gerarIdFatura({
-            uc: unidadeDestino?.numeroUC || ucExtraida || componentes.uc,
-            referencia: normalizarRef(componentes.referencia),
-            numeroNota: componentes.numeroNota,
-            hashArquivo,
-          }),
+          chaveIdempotencia: montarChaveIdempotencia(dadosIdentidadeFatura),
+          idFatura,
           statusProcessamento:
             decisao.decisao === DECISAO.PROCESSADO
               ? STATUS_FATURA.PROCESSADO
@@ -1352,6 +1387,31 @@ function FaturasSection() {
           // Rastreio do pipeline
           vinculadaAutomaticamente: Boolean(clienteDestino),
           pendenteVinculacao: !clienteDestino,
+        }
+
+        if (clienteDestino?.uid) {
+          const envioPdf = await enviarPdfFatura({
+            clienteUid: clienteDestino.uid,
+            uc: dadosFatura.uc,
+            faturaId: idFatura,
+            arquivo: file,
+          })
+          if (envioPdf.ok) {
+            dadosFatura.storagePath = envioPdf.caminho
+            dadosFatura.erroPdfCompartilhado = null
+            adicionarPasso(key, '✓ PDF salvo no armazenamento compartilhado')
+          } else {
+            dadosFatura.erroPdfCompartilhado = envioPdf.message
+            atualizarItem(key, {
+              aviso: `Dados extraídos; o PDF não foi compartilhado: ${envioPdf.message}`,
+            })
+          }
+        } else if (clienteDestino) {
+          dadosFatura.erroPdfCompartilhado =
+            'O cliente ainda não tem UID do Firebase. Crie o acesso do cliente e reenvie o PDF para compartilhá-lo.'
+          atualizarItem(key, {
+            aviso: dadosFatura.erroPdfCompartilhado,
+          })
         }
 
         // ===== 10. Salva no Firestore (não bloqueia) e no localStorage =====
@@ -1633,6 +1693,9 @@ function FaturasSection() {
                     {item.erro && (
                       <small style={{ display: 'block', color: '#dc2626' }}>{item.erro}</small>
                     )}
+                    {item.aviso && (
+                      <small style={{ display: 'block', color: '#854d0e' }}>{item.aviso}</small>
+                    )}
                     {item.passos?.length > 0 && (
                       <small style={{ display: 'block', color: '#64748b', marginTop: '4px' }}>
                         {item.passos.join(' · ')}
@@ -1666,6 +1729,11 @@ function FaturasSection() {
                 {fat.pendenteVinculacao && (
                   <small style={{ display: 'block', color: '#b45309' }}>
                     ⚠ Aguardando confirmação de pré-cadastro
+                  </small>
+                )}
+                {fat.erroPdfCompartilhado && (
+                  <small style={{ display: 'block', color: '#854d0e' }}>
+                    ⚠ PDF não compartilhado: {fat.erroPdfCompartilhado}
                   </small>
                 )}
                 {fat.calculo && (
@@ -1718,6 +1786,11 @@ function FaturasSection() {
                 <strong>{fat.arquivo}</strong>
                 <small>Cliente: {fat.clienteNome || '—'} · UC: {fat.uc || '—'}</small>
                 <small>Ref: {fat.referencia || '—'} · {fat.valorTotal ? formatCurrency(fat.valorTotal) : '—'} · {fat.consumo ? `${fat.consumo} kWh` : '—'}</small>
+                {fat.erroPdfCompartilhado && (
+                  <small style={{ display: 'block', color: '#854d0e' }}>
+                    ⚠ PDF não compartilhado: {fat.erroPdfCompartilhado}
+                  </small>
+                )}
                 {fat.calculo && (
                   <small style={{ display: 'block', color: '#166534' }}>
                     💰 Energia: {formatCurrency(fat.calculo.valorElegivel)} · Desconto 20%: {formatCurrency(fat.calculo.valorDesconto)} · Impostos: {formatCurrency(fat.calculo.impostosTributosEncargos)} · Final: {formatCurrency(fat.calculo.valorFinal)}

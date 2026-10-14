@@ -44,6 +44,12 @@ import {
   ehEmailAdminMaster,
   podeAdministrar,
 } from '../src/services/adminAccess.js'
+import {
+  clienteIdParaFatura,
+  filtrarFaturasDoCliente,
+  ordenarPorCompetencia,
+  propagarVinculoCliente,
+} from '../src/services/persistencia.js'
 
 test('Administrador master: só a conta definida pode gerir usuários', () => {
   assert.equal(MASTER_ADMIN_EMAIL, 'thyagopatriota2020@gmail.com')
@@ -53,6 +59,46 @@ test('Administrador master: só a conta definida pode gerir usuários', () => {
   assert.equal(podeAdministrar({ email: MASTER_ADMIN_EMAIL }), true)
   assert.equal(podeAdministrar({ email: 'operador@natureforce.com' }), false)
   assert.equal(podeAdministrar({ claimAdmin: true }), true)
+})
+
+test('Faturas usam UID Firebase quando o cliente tem conta provisionada', () => {
+  assert.equal(clienteIdParaFatura({ id: 'cliente-local-1', uid: 'firebase-uid-1' }), 'firebase-uid-1')
+  assert.equal(clienteIdParaFatura({ id: 'cliente-local-1' }), 'cliente-local-1')
+  assert.equal(clienteIdParaFatura(null), null)
+})
+
+test('Vínculo Firebase migra faturas legadas do id local para o UID', () => {
+  const cliente = { id: 'cliente-local-1', uid: 'firebase-uid-1', nome: 'Cliente' }
+  const fatura = {
+    id: 'fat_123',
+    clienteId: cliente.id,
+    uc: '123456',
+    status: 'disponivel',
+  }
+  const resultado = propagarVinculoCliente({
+    clientes: [cliente],
+    unidades: [{ id: 'uc_1', clienteId: cliente.id, numeroUC: '123456' }],
+    faturas: [fatura],
+    cliente,
+    uid: cliente.uid,
+  })
+
+  assert.equal(resultado.faturas[0].clienteId, cliente.uid)
+  assert.equal(resultado.faturas[0].clienteIdLocal, cliente.id)
+  assert.equal(resultado.faturas[0].pendenteVinculacao, false)
+  assert.equal(
+    filtrarFaturasDoCliente({ faturas: resultado.faturas, clienteId: cliente.uid }).length,
+    1,
+  )
+})
+
+test('Faturas são ordenadas por competência com a mais recente primeiro', () => {
+  const ordenadas = ordenarPorCompetencia([
+    { id: 'marco', referencia: '2026-03' },
+    { id: 'janeiro', referencia: '2026-01' },
+    { id: 'fevereiro', referencia: '2026-02' },
+  ])
+  assert.deepEqual(ordenadas.map((fatura) => fatura.id), ['marco', 'fevereiro', 'janeiro'])
 })
 
 // ==================== Cenário-base ====================

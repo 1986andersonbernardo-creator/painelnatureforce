@@ -30,6 +30,32 @@ mesmo se `VITE_ADMIN_EMAILS` for configurado para outros administradores. A
 variável de ambiente pode listar administradores operacionais; nunca a use
 como substituta das Firestore Security Rules.
 
+## Faturas e PDFs visíveis no portal do cliente
+
+O portal consulta faturas pelo UID da conta Firebase do cliente e só mostra as
+que têm `status: "disponivel"`. O painel publica novas faturas depois da revisão.
+Ao entrar um administrador autenticado, o sistema também migra faturas e UCs
+legadas do ID local do cliente para o UID quando esse UID já está vinculado.
+
+Os PDFs novos são enviados ao Firebase Storage em
+`faturas/{uid}/{uc}/{id-da-fatura}.pdf`. Para habilitar upload e download:
+
+1. Confirme no Console do Firebase que o **Storage** está inicializado no
+   projeto `natureforce-65cdc` e que existe um bucket configurado.
+2. Na raiz do projeto, execute:
+
+   ```powershell
+   npm run deploy:storage
+   ```
+
+3. Importe a fatura após provisionar o acesso Firebase do cliente. O painel
+   informa se o upload compartilhado falhar. O cliente deve entrar com a conta
+   Firebase correspondente para visualizar e baixar o PDF.
+
+Faturas antigas sem PDF compartilhado podem ser migradas reenviando o mesmo PDF
+no painel. Se o cliente tiver UID e a fatura já estiver cadastrada, a duplicata
+é reconhecida e o PDF é enviado ao Storage sem criar outra fatura.
+
 ## Por que isso acontece
 
 O login administrativo valida as credenciais **no Firebase Authentication**

@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "test": "node --test tests/run-tests.mjs",
     "deploy:rules": "npx --yes firebase-tools deploy --only firestore:rules --project natureforce-65cdc",
+    "deploy:storage": "npx --yes firebase-tools deploy --only storage --project natureforce-65cdc",
     "set-admin": "node scripts/set-admin-claim.cjs"
   },
   "dependencies": {
