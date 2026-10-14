@@ -27,6 +27,7 @@ import {
   alterarStatusAdministrador,
   convidarAdministrador,
   removerFaturaServidor,
+  removerTodasFaturasServidor,
 } from '../firebase/adminFunctions'
 import {
   getClientePorUid,
@@ -1118,6 +1119,29 @@ export function AuthProvider({ children }) {
     }
   }
 
+  const removeTodasFaturas = async () => {
+    try {
+      const resultado = await removerTodasFaturasServidor()
+      const falhas = new Set(resultado.failedIds || [])
+      const faturasRestantes = getStore('faturas').filter((fatura) =>
+        falhas.has(idDocumento('faturas', fatura)),
+      )
+      setStore('faturas', faturasRestantes)
+      bumpVersao()
+      logar(
+        'Remoção em lote de faturas',
+        `${resultado.removed} removida(s); ${resultado.failed} falha(s).`,
+        session?.nome || 'Sistema',
+      )
+      return resultado
+    } catch (error) {
+      return {
+        ok: false,
+        message: error?.message || 'Não foi possível remover as faturas do banco central.',
+      }
+    }
+  }
+
   /**
    * Associação MANUAL de uma UC (fatura pendente) a um cliente existente.
    * Grava UC → cliente, vincula as faturas daquela UC, remove o pré-cadastro
@@ -1528,6 +1552,7 @@ export function AuthProvider({ children }) {
     addFatura,
     updateFatura,
     removeFatura,
+    removeTodasFaturas,
     // Associação manual de uma UC (fatura pendente) a um cliente JÁ cadastrado
     associarUnidadeCliente,
     getUsuarios,

@@ -20,6 +20,7 @@ import { listarPaginaAuditoria } from '../../firebase/firestore'
 import { enviarPdfFatura } from '../../firebase/storage'
 import {
   publicarFaturaValidada,
+  contarFaturasParaRemocao,
   revogarTokensPdfLegados,
 } from '../../firebase/adminFunctions'
 
@@ -1068,6 +1069,7 @@ function FaturasSection() {
     addFatura,
     updateFatura,
     removeFatura,
+    removeTodasFaturas,
     getClientes,
     getUnidades,
     processarPDF,
@@ -1086,6 +1088,7 @@ function FaturasSection() {
   const [mensagem, setMensagem] = useState('')
   const [mensagemErro, setMensagemErro] = useState('')
   const [processando, setProcessando] = useState(false)
+  const [limpandoTodas, setLimpandoTodas] = useState(false)
   // Fila de progresso em tempo real (um item por arquivo)
   const [fila, setFila] = useState([])
 
@@ -1738,6 +1741,51 @@ function FaturasSection() {
     refresh()
   }
 
+  const removerTodasFaturasComConfirmacao = async () => {
+    setMensagem('')
+    setMensagemErro('')
+    try {
+      const previa = await contarFaturasParaRemocao()
+      if (!previa.total) {
+        setMensagem('Não há faturas ativas para remover.')
+        return
+      }
+
+      const confirmado = window.confirm(
+        `Foram encontradas ${previa.total} faturas ativas no banco central. ` +
+        'A ação removerá os PDFs do Storage e ocultará as faturas dos clientes, ' +
+        'mas manterá os registros e a auditoria para permitir reenvio e rastreabilidade. Continuar?',
+      )
+      if (!confirmado) return
+
+      setLimpandoTodas(true)
+      const resultado = await removeTodasFaturas()
+      refresh()
+      if (resultado?.message) {
+        setMensagemErro(resultado.message)
+      } else if (resultado?.failed > 0) {
+        setMensagemErro(
+          `Remoção parcial: ${resultado.removed} fatura(s) removida(s); ` +
+          `${resultado.failed} não puderam ser removidas e foram mantidas para revisão.`,
+        )
+      } else {
+        setMensagem(
+          `Concluído: ${resultado?.removed || 0} fatura(s) removida(s) do portal e PDFs apagados. ` +
+          'Os registros e a auditoria foram preservados.',
+        )
+      }
+      setTimeout(() => {
+        setMensagem('')
+        setMensagemErro('')
+      }, 10000)
+    } catch (error) {
+      setMensagemErro(error?.message || 'Não foi possível consultar ou remover as faturas.')
+      setTimeout(() => setMensagemErro(''), 10000)
+    } finally {
+      setLimpandoTodas(false)
+    }
+  }
+
   const faturasPendentes = faturas.filter((f) => f.status === 'aguardando revisão')
   const faturasPublicadas = faturas.filter((f) => f.status === 'disponivel')
   const faturasRequerRevisao = faturas.filter((f) => f.status === 'requer revisão')
@@ -1771,7 +1819,29 @@ function FaturasSection() {
             <span className="eyebrow">Upload de faturas</span>
             <h3>Importação automática (identifica UC, cliente e vincula a fatura)</h3>
           </div>
+          <button
+            type="button"
+            onClick={removerTodasFaturasComConfirmacao}
+            disabled={processando || limpandoTodas}
+            style={{
+              border: '1px solid #dc2626',
+              borderRadius: '8px',
+              padding: '9px 12px',
+              color: limpandoTodas ? '#64748b' : '#b91c1c',
+              background: '#fff',
+              cursor: processando || limpandoTodas ? 'not-allowed' : 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {limpandoTodas ? 'Removendo faturas…' : 'Remover todas as faturas'}
+          </button>
         </div>
+
+        {limpandoTodas && (
+          <p style={{ padding: '10px', background: '#fff7ed', color: '#9a3412', borderRadius: '8px', marginBottom: '12px' }}>
+            Removendo os PDFs e ocultando as faturas dos clientes. Aguarde até a confirmação.
+          </p>
+        )}
 
         {mensagem && (
           <p style={{ padding: '10px', background: '#f0fdf4', color: '#166534', borderRadius: '8px', marginBottom: '12px' }}>
@@ -1790,7 +1860,7 @@ function FaturasSection() {
             accept=".pdf,application/pdf"
             multiple
             style={{ display: 'none' }}
-            disabled={processando}
+            disabled={processando || limpandoTodas}
             onChange={(e) => {
               handleUpload(e.target.files)
               e.target.value = ''

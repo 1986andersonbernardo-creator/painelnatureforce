@@ -57,6 +57,14 @@ Faturas antigas sem PDF compartilhado podem ser migradas reenviando o mesmo PDF
 no painel. Se o cliente tiver UID e a fatura já estiver cadastrada, a duplicata
 é reconhecida e o PDF é enviado ao Storage sem criar outra fatura.
 
+Na aba **Faturas**, administradores também podem usar **Remover todas as
+faturas** para preparar um novo teste: a ação pede confirmação, remove os PDFs
+do Storage e tira as faturas do portal dos clientes, mas preserva os registros
+marcados como removidos e a auditoria. PDFs apagados podem ser enviados
+novamente. Para disponibilizar a ação, publique a nova versão do site e as
+Cloud Functions com `npm run deploy:functions`. Não é necessário alterar as
+regras do Firestore ou do Storage para essa operação.
+
 ## Por que isso acontece
 
 O login administrativo autentica exclusivamente no Firebase Authentication.

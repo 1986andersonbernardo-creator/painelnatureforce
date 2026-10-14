@@ -24,6 +24,22 @@ export const removerFaturaServidor = async (faturaId) => {
   return result.data
 }
 
+export const contarFaturasParaRemocao = async () => {
+  const result = await httpsCallable(functions, 'removerTodasFaturasAdministrativas')({
+    preview: true,
+  })
+  return result.data
+}
+
+export const removerTodasFaturasServidor = async () => {
+  const result = await httpsCallable(
+    functions,
+    'removerTodasFaturasAdministrativas',
+    { timeout: 540_000 },
+  )({ operationId: crypto.randomUUID() })
+  return result.data
+}
+
 export const revogarTokensPdfLegados = async (onProgress = () => {}) => {
   const callable = httpsCallable(functions, 'revogarTokensDownloadLegados')
   const operationId = crypto.randomUUID()

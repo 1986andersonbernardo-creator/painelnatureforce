@@ -1,7 +1,7 @@
 const { randomUUID } = require('node:crypto')
 const { initializeApp } = require('firebase-admin/app')
 const { getAuth } = require('firebase-admin/auth')
-const { FieldValue, getFirestore } = require('firebase-admin/firestore')
+const { FieldPath, FieldValue, getFirestore } = require('firebase-admin/firestore')
 const { getStorage } = require('firebase-admin/storage')
 const { onDocumentWritten } = require('firebase-functions/v2/firestore')
 const { onCall, HttpsError } = require('firebase-functions/v2/https')
@@ -581,7 +581,7 @@ exports.publicarFaturaValidada = onCall(async (request) => {
   return { ok: true, ...resultado, operationId }
 })
 
-exports.removerFaturaAdministrativa = onCall(async (request) => {
+const autorizarRemocaoFaturas = async (request) => {
   const actor = authenticated(request)
   const actorEmail = String(actor.token.email || '').toLowerCase()
   const profile = actorEmail
@@ -603,48 +603,69 @@ exports.removerFaturaAdministrativa = onCall(async (request) => {
     })
     throw new HttpsError('permission-denied', 'A conta não está autorizada a remover faturas.')
   }
+  return { actor, actorEmail }
+}
 
-  const faturaId = String(request.data?.faturaId || '').trim()
-  if (!faturaId) throw new HttpsError('invalid-argument', 'Identificador da fatura obrigatório.')
+const removerFaturaDoFirestore = async ({ actor, actorEmail, faturaId, operationId = randomUUID() }) => {
   const faturaRef = db.collection('faturas').doc(faturaId)
-  const faturaSnap = await faturaRef.get()
-  if (!faturaSnap.exists) throw new HttpsError('not-found', 'Fatura não encontrada.')
-  const fatura = faturaSnap.data()
-  const operationId = randomUUID()
-  const storagePath = String(fatura.storagePath || '')
-  if (
-    storagePath &&
-    !storagePath.startsWith(`faturas/${fatura.clienteId}/${normalizarUC(fatura.uc)}/`)
-  ) {
-    throw new HttpsError('failed-precondition', 'O caminho do PDF não corresponde ao vínculo da fatura.')
-  }
+  let fatura
+  let iniciada = false
+  try {
+    await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(faturaRef)
+      if (!current.exists) throw new HttpsError('not-found', 'Fatura não encontrada.')
+      fatura = current.data()
+      if (fatura.status === 'removida') return
 
-  await db.runTransaction(async (transaction) => {
-    const current = await transaction.get(faturaRef)
-    if (!current.exists) throw new HttpsError('not-found', 'Fatura não encontrada.')
-    transaction.update(faturaRef, {
-      status: 'excluindo',
-      versaoAtual: false,
-      administradorUid: actor.uid,
-      operationId,
+      const storagePath = String(fatura.storagePath || '')
+      if (
+        storagePath &&
+        !storagePath.startsWith(`faturas/${fatura.clienteId}/${normalizarUC(fatura.uc)}/`)
+      ) {
+        throw new HttpsError('failed-precondition', 'O caminho do PDF não corresponde ao vínculo da fatura.')
+      }
+
+      transaction.update(faturaRef, {
+        status: 'excluindo',
+        versaoAtual: false,
+        administradorUid: actor.uid,
+        operationId,
+      })
+      transaction.set(db.collection('logs').doc(randomUUID()), {
+        actorUid: actor.uid,
+        actorEmail,
+        actorRole: actor.token.role || (actorEmail === masterEmail ? 'master' : 'admin'),
+        operation: 'INVOICE_DELETE_STARTED',
+        entity: 'faturas',
+        entityId: faturaId,
+        clienteId: fatura.clienteId || null,
+        uc: fatura.uc || null,
+        before: { status: fatura.status, storagePath: Boolean(storagePath) },
+        after: { status: 'excluindo' },
+        operationId,
+        result: 'started',
+        createdAt: FieldValue.serverTimestamp(),
+      })
+      iniciada = true
     })
-    transaction.set(db.collection('logs').doc(randomUUID()), {
+  } catch (error) {
+    await registrarAuditoria({
       actorUid: actor.uid,
       actorEmail,
       actorRole: actor.token.role || (actorEmail === masterEmail ? 'master' : 'admin'),
-      operation: 'INVOICE_DELETE_STARTED',
+      operation: 'INVOICE_DELETE_FAILED',
       entity: 'faturas',
       entityId: faturaId,
-      clienteId: fatura.clienteId || null,
-      uc: fatura.uc || null,
-      before: { status: fatura.status, storagePath: Boolean(storagePath) },
-      after: { status: 'excluindo' },
+      clienteId: fatura?.clienteId || null,
+      uc: fatura?.uc || null,
       operationId,
-      result: 'started',
-      createdAt: FieldValue.serverTimestamp(),
+      result: error.code || 'firestore-error',
     })
-  })
+    throw error
+  }
+  if (!iniciada) return { removed: false, alreadyRemoved: true }
 
+  const storagePath = String(fatura.storagePath || '')
   try {
     if (storagePath) await getStorage().bucket().file(storagePath).delete({ ignoreNotFound: true })
   } catch (error) {
@@ -664,11 +685,28 @@ exports.removerFaturaAdministrativa = onCall(async (request) => {
     throw new HttpsError('internal', 'A fatura foi retirada do portal, mas o PDF não pôde ser removido.')
   }
 
-  await faturaRef.update({
-    status: 'removida',
-    removidaEm: FieldValue.serverTimestamp(),
-    atualizadoEm: FieldValue.serverTimestamp(),
-  })
+  try {
+    await faturaRef.update({
+      status: 'removida',
+      removidaEm: FieldValue.serverTimestamp(),
+      atualizadoEm: FieldValue.serverTimestamp(),
+    })
+  } catch (error) {
+    await registrarAuditoria({
+      actorUid: actor.uid,
+      actorEmail,
+      actorRole: actor.token.role || (actorEmail === masterEmail ? 'master' : 'admin'),
+      operation: 'INVOICE_DELETE_FAILED',
+      entity: 'faturas',
+      entityId: faturaId,
+      clienteId: fatura.clienteId || null,
+      uc: fatura.uc || null,
+      operationId,
+      result: error.code || 'firestore-finalize-error',
+    })
+    throw new HttpsError('internal', 'O PDF foi removido, mas não foi possível concluir o registro da remoção.')
+  }
+
   await registrarAuditoria({
     actorUid: actor.uid,
     actorEmail,
@@ -682,7 +720,72 @@ exports.removerFaturaAdministrativa = onCall(async (request) => {
     after: { status: 'removida' },
     operationId,
   })
-  return { ok: true, operationId }
+  return { removed: true, operationId }
+}
+
+exports.removerFaturaAdministrativa = onCall(async (request) => {
+  const { actor, actorEmail } = await autorizarRemocaoFaturas(request)
+  const faturaId = String(request.data?.faturaId || '').trim()
+  if (!faturaId) throw new HttpsError('invalid-argument', 'Identificador da fatura obrigatório.')
+  const result = await removerFaturaDoFirestore({ actor, actorEmail, faturaId })
+  return { ok: true, ...result }
+})
+
+exports.removerTodasFaturasAdministrativas = onCall({ timeoutSeconds: 540 }, async (request) => {
+  const { actor, actorEmail } = await autorizarRemocaoFaturas(request)
+  const operationId = String(request.data?.operationId || randomUUID())
+  const faturas = await db.collection('faturas').orderBy(FieldPath.documentId()).get()
+  const elegiveis = faturas.docs.filter((document) => document.get('status') !== 'removida')
+
+  if (request.data?.preview === true) {
+    return { ok: true, total: elegiveis.length }
+  }
+
+  let removidas = 0
+  const falhas = []
+  for (let inicio = 0; inicio < elegiveis.length; inicio += 10) {
+    const lote = elegiveis.slice(inicio, inicio + 10)
+    const resultados = await Promise.all(lote.map(async (document) => {
+      try {
+        const result = await removerFaturaDoFirestore({
+          actor,
+          actorEmail,
+          faturaId: document.id,
+          operationId,
+        })
+        return { id: document.id, ...result }
+      } catch (error) {
+        return { id: document.id, error: error.code || 'delete-failed' }
+      }
+    }))
+    for (const result of resultados) {
+      if (result.error) falhas.push({ id: result.id, code: result.error })
+      else if (result.removed) removidas += 1
+    }
+  }
+
+  await registrarAuditoria({
+    actorUid: actor.uid,
+    actorEmail,
+    actorRole: actor.token.role || (actorEmail === masterEmail ? 'master' : 'admin'),
+    operation: 'INVOICE_BULK_DELETE_COMPLETED',
+    entity: 'faturas',
+    entityId: operationId,
+    before: { eligible: elegiveis.length },
+    after: { removed: removidas, failed: falhas.length },
+    operationId,
+    result: falhas.length ? 'partial' : 'success',
+  })
+
+  return {
+    ok: falhas.length === 0,
+    total: elegiveis.length,
+    removed: removidas,
+    failed: falhas.length,
+    failedIds: falhas.map((item) => item.id),
+    failures: falhas.slice(0, 20),
+    operationId,
+  }
 })
 
 exports.registrarSolicitacaoAcessoFatura = onCall(async (request) => {
