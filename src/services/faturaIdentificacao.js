@@ -165,8 +165,32 @@ export const identificarFatura = ({ componentes = {}, unidades = [], clientes = 
         }
       }
 
-      const cliente =
-        clientes.find((c) => String(c.id) === String(unidade.clienteId)) || null
+      const clientesCorrespondentes = clientes.filter(
+        (c) =>
+          String(c.id) === String(unidade.clienteId) ||
+          String(c.uid || '') === String(unidade.clienteId),
+      )
+      const clientesUnicos = new Map()
+      for (const candidato of clientesCorrespondentes) {
+        const identidade = String(candidato.uid || candidato.id || '')
+        const atual = clientesUnicos.get(identidade)
+        if (!atual || (!atual.uid && candidato.uid)) {
+          clientesUnicos.set(identidade, candidato)
+        }
+      }
+      const clientesVinculados = [...clientesUnicos.values()]
+
+      if (clientesVinculados.length > 1) {
+        return {
+          decisao: DECISAO.REVISAO_MANUAL,
+          motivo: MOTIVO_REVISAO.CLIENTE_AMBIGUO,
+          uc,
+          unidade,
+          cliente: null,
+        }
+      }
+
+      const cliente = clientesVinculados[0] || null
 
       // UC existe mas não tem cliente vinculado → revisão (nunca criar cliente)
       if (!cliente) {
@@ -232,4 +256,3 @@ export const podeAcessarRecurso = ({ uid, clienteId }) => {
   if (!uid || !clienteId) return false
   return String(uid) === String(clienteId)
 }
-

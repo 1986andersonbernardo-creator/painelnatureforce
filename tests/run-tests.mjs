@@ -126,6 +126,49 @@ const unidades = [
   { id: 'U5', clienteId: 'C3', numeroUC: '999001', titularNome: 'JOÃO DA SILVA', titularCpfCnpj: '111.222.333-44', endereco: 'Rua do Comercio, 1' },
   { id: 'U6', clienteId: 'C3', numeroUC: '999002', titularNome: 'JOÃO DA SILVA', titularCpfCnpj: '111.222.333-44', endereco: 'Rua do Comercio, 2' },
 ]
+
+test('Identifica cliente quando a UC já está vinculada pelo UID Firebase e preserva zeros da UC', () => {
+  const cliente = { id: 'cliente-local-1', uid: 'firebase-uid-1', nome: 'Cliente' }
+  const unidade = { id: 'uc-1', clienteId: cliente.uid, numeroUC: '001234' }
+  const resultado = identificarFatura({
+    componentes: { uc: '00.123-4' },
+    unidades: [unidade],
+    clientes: [cliente],
+  })
+
+  assert.equal(resultado.decisao, DECISAO.PROCESSADO)
+  assert.equal(resultado.cliente, cliente)
+  assert.equal(resultado.uc, '001234')
+})
+
+test('Registros espelhados do mesmo UID não tornam o vínculo ambíguo', () => {
+  const clienteVinculado = { id: 'cliente-local-1', uid: 'firebase-uid-1', nome: 'Cliente' }
+  const clienteEspelhado = { id: 'firebase-uid-1', nome: 'Cliente' }
+  const resultado = identificarFatura({
+    componentes: { uc: '001234' },
+    unidades: [{ id: 'uc-1', clienteId: 'firebase-uid-1', numeroUC: '001234' }],
+    clientes: [clienteVinculado, clienteEspelhado],
+  })
+
+  assert.equal(resultado.decisao, DECISAO.PROCESSADO)
+  assert.equal(resultado.cliente, clienteVinculado)
+})
+
+test('Identificação encaminha para revisão quando um ID local aponta para clientes distintos', () => {
+  const resultado = identificarFatura({
+    componentes: { uc: '001234' },
+    unidades: [{ id: 'uc-1', clienteId: 'cliente-local-1', numeroUC: '001234' }],
+    clientes: [
+      { id: 'cliente-local-1', uid: 'firebase-uid-1' },
+      { id: 'cliente-local-1', uid: 'firebase-uid-2' },
+    ],
+  })
+
+  assert.equal(resultado.decisao, DECISAO.REVISAO_MANUAL)
+  assert.equal(resultado.motivo, MOTIVO_REVISAO.CLIENTE_AMBIGUO)
+  assert.equal(resultado.cliente, null)
+})
+
 // ===================== 1. Cliente com uma UC =====================
 test('01. Cliente com 1 UC → PROCESSADO', () => {
   const r = identificarFatura({ componentes: { uc: '345678' }, unidades, clientes })

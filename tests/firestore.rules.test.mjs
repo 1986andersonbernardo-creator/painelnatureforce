@@ -143,6 +143,7 @@ test('PDF é privado por UID e só fica disponível com fatura publicada vincula
     admin: true,
   })
   const clientA = environment.authenticatedContext('cliente-a', { email: 'a@example.com' })
+  const clientANewSession = environment.authenticatedContext('cliente-a', { email: 'a@example.com' })
   const clientB = environment.authenticatedContext('cliente-b', { email: 'b@example.com' })
   const path = 'faturas/cliente-a/001234/fatura-a.pdf'
   const file = new Uint8Array([37, 80, 68, 70, 45])
@@ -152,6 +153,9 @@ test('PDF é privado por UID e só fica disponível com fatura publicada vincula
     customMetadata: { faturaId: 'fatura-a' },
   }))
   await assertSucceeds(getBytes(ref(clientA.storage(), path)))
+  await assertSucceeds(getDoc(doc(clientANewSession.firestore(), 'faturas', 'fatura-a')))
+  await assertSucceeds(getBytes(ref(clientANewSession.storage(), path)))
+  await assertFails(getDoc(doc(clientB.firestore(), 'faturas', 'fatura-a')))
   await assertFails(getBytes(ref(clientB.storage(), path)))
 
   const pendingPath = 'faturas/cliente-a/001234/fatura-pendente.pdf'

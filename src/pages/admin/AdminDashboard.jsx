@@ -1102,6 +1102,7 @@ function FaturasSection() {
   const statusPorMotivo = {
     [MOTIVO_REVISAO.UC_NAO_ENCONTRADA]: 'UC_NAO_CADASTRADA',
     [MOTIVO_REVISAO.UC_SEM_CLIENTE]: 'UC_SEM_CLIENTE',
+    [MOTIVO_REVISAO.CLIENTE_AMBIGUO]: 'CLIENTE_AMBIGUO',
     [MOTIVO_REVISAO.MULTIPLAS_UCS]: 'MULTIPLAS_UCS',
     [MOTIVO_REVISAO.CLIENTE_INCOMPATIVEL]: 'CLIENTE_INCOMPATIVEL',
     [MOTIVO_REVISAO.UC_AUSENTE_NO_PDF]: 'UC_NAO_IDENTIFICADA',
@@ -1124,6 +1125,8 @@ function FaturasSection() {
         return `Mais de uma unidade cadastrada corresponde à UC ${uc || '—'}. Confirme manualmente qual é a correta.`
       case MOTIVO_REVISAO.UC_SEM_CLIENTE:
         return `A UC ${uc || '—'} existe, mas não tem cliente vinculado. Vincule um cliente para liberar a fatura.`
+      case MOTIVO_REVISAO.CLIENTE_AMBIGUO:
+        return `A UC ${uc || '—'} corresponde a mais de um cadastro de cliente. Corrija o vínculo antes de publicar a fatura.`
       case MOTIVO_REVISAO.CLIENTE_INCOMPATIVEL:
         return `Os dados do titular (CPF/CNPJ) não conferem com a UC ${uc || '—'}. Confirme manualmente antes de vincular.`
       case MOTIVO_REVISAO.SEM_DADOS_IDENTIFICACAO:
@@ -1296,6 +1299,7 @@ function FaturasSection() {
           if (clienteDestino?.uid && !duplicada.storagePath) {
             const faturaId =
               duplicada.idFatura ||
+              duplicada.firestoreId ||
               gerarIdFatura({
                 uc: duplicada.uc || ucExtraida,
                 referencia: duplicada.referencia || normalizarRef(componentes.referencia),
@@ -1309,17 +1313,45 @@ function FaturasSection() {
               arquivo: file,
             })
             if (envio.ok) {
-              updateFatura(duplicada.id, {
-                clienteId: clienteDestino.uid,
-                clienteIdLocal: clienteDestino.id,
-                storagePath: envio.caminho,
-                erroPdfCompartilhado: null,
-              })
-              aviso = `Fatura já cadastrada. PDF sincronizado para ${clienteDestino.nome}.`
+              try {
+                const publicacao = await publicarFaturaValidada({
+                  faturaId,
+                  uc: duplicada.uc || unidadeDestino?.numeroUC || ucExtraida,
+                  ucExtraida,
+                  referencia: duplicada.referencia || normalizarRef(componentes.referencia),
+                  storagePath: envio.caminho,
+                  fatura: {
+                    ...duplicada,
+                    clienteId: clienteDestino.uid,
+                    clienteIdLocal: clienteDestino.id,
+                    uc: duplicada.uc || unidadeDestino?.numeroUC || ucExtraida,
+                    storagePath: envio.caminho,
+                  },
+                })
+                updateFatura(
+                  duplicada.id,
+                  {
+                    clienteId: publicacao.clienteId,
+                    clienteIdLocal: publicacao.clienteIdLocal || clienteDestino.id,
+                    storagePath: envio.caminho,
+                    status: 'disponivel',
+                    versao: publicacao.version,
+                    versaoAtual: true,
+                    idFatura: publicacao.faturaId,
+                    firestoreId: publicacao.faturaId,
+                    erroPdfCompartilhado: null,
+                  },
+                  { sync: false },
+                )
+                aviso = `Fatura já cadastrada e publicada no portal de ${clienteDestino.nome}.`
+              } catch (error) {
+                updateFatura(duplicada.id, {
+                  erroPdfCompartilhado: error?.message || 'Não foi possível publicar a fatura no portal.',
+                })
+                aviso = `Fatura já cadastrada, mas não publicada: ${error?.message || 'falha na publicação central.'}`
+              }
             } else {
               updateFatura(duplicada.id, {
-                clienteId: clienteDestino.uid,
-                clienteIdLocal: clienteDestino.id,
                 erroPdfCompartilhado: envio.message,
               })
               aviso = `${aviso} O PDF continua sem cópia compartilhada: ${envio.message}`
@@ -1483,7 +1515,8 @@ function FaturasSection() {
           })
         }
 
-        // ===== 10. Salva no Firestore (não bloqueia) e no localStorage =====
+        // ===== 10. Persiste metadados centrais antes de informar sucesso =====
+        let persistenciaCentralOk = publicadaCentral
         try {
           if (publicadaCentral) {
             dadosFatura.firestoreId = idFatura
@@ -1492,12 +1525,19 @@ function FaturasSection() {
               salvarFaturaIdempotenteFirestore(dadosFatura),
               8000,
             )
-            if (resultadoFirestore.ok) {
+            if (resultadoFirestore.ok || resultadoFirestore.duplicada) {
               dadosFatura.firestoreId = resultadoFirestore.id
+              persistenciaCentralOk = true
+            } else {
+              dadosFatura.status = 'erro'
+              dadosFatura.erroPdfCompartilhado =
+                resultadoFirestore.message || 'Os metadados não foram gravados no banco central.'
             }
           }
         } catch (e) {
-          console.warn('Firestore indisponível — fatura salva apenas localmente:', e.message)
+          dadosFatura.status = 'erro'
+          dadosFatura.erroPdfCompartilhado =
+            e?.message || 'Os metadados não foram gravados no banco central.'
         }
 
         const resultadoLocal = addFatura(dadosFatura)
@@ -1520,10 +1560,18 @@ function FaturasSection() {
         }
 
         // ===== 12. Roteamento por identificação da UC =====
-        if (clienteDestino) {
+        if (!persistenciaCentralOk) {
+          adicionarPasso(key, '⚠ Fatura não confirmada no banco central; não foi disponibilizada ao cliente')
+          atualizarItem(key, {
+            status: 'ERRO_PERSISTENCIA',
+            cliente: clienteDestino?.nome || '—',
+            faturaId: resultadoLocal.ok ? resultadoLocal.fatura.id : null,
+            aviso: dadosFatura.erroPdfCompartilhado,
+          })
+        } else if (publicadaCentral && clienteDestino) {
           // UC encontrada → fatura vinculada automaticamente
           adicionarPasso(key, `✓ Cliente encontrado: ${clienteDestino.nome}`)
-          adicionarPasso(key, '✓ Fatura vinculada')
+          adicionarPasso(key, '✓ Fatura publicada no portal do cliente')
           atualizarItem(key, {
             status: 'VINCULADA',
             cliente: clienteDestino.nome,
@@ -1534,6 +1582,15 @@ function FaturasSection() {
             `Fatura ${file.name} vinculada automaticamente ao cliente ${clienteDestino.nome} (UC ${ucExtraida})`,
             session?.nome || 'Sistema',
           )
+        } else if (clienteDestino) {
+          adicionarPasso(key, `✓ Cliente encontrado: ${clienteDestino.nome}`)
+          adicionarPasso(key, '⚠ Fatura aguardando publicação administrativa')
+          atualizarItem(key, {
+            status: 'PENDENTE_PUBLICACAO',
+            cliente: clienteDestino.nome,
+            faturaId: resultadoLocal.ok ? resultadoLocal.fatura.id : null,
+            aviso: dadosFatura.erroPdfCompartilhado,
+          })
         } else if (
           ucExtraida &&
           (decisao.motivo === MOTIVO_REVISAO.UC_SEM_CLIENTE ||
@@ -1690,6 +1747,8 @@ function FaturasSection() {
   const rotuloStatus = {
     PROCESSANDO: { texto: 'Processando', classe: 'tag tag-neutral' },
     VINCULADA: { texto: 'Vinculada', classe: 'tag tag-success' },
+    PENDENTE_PUBLICACAO: { texto: 'Aguardando publicação', classe: 'tag tag-warning' },
+    ERRO_PERSISTENCIA: { texto: 'Falha no banco central', classe: 'tag tag-error' },
     NOVO_CLIENTE: { texto: 'Novo cliente', classe: 'tag tag-warning' },
     PENDENTE_REVISÃO: { texto: 'Pendente revisão', classe: 'tag tag-warning' },
     DUPLICADA: { texto: 'Duplicada', classe: 'tag tag-error' },
@@ -1697,6 +1756,7 @@ function FaturasSection() {
     // "UC não identificada", mesmo quando a UC havia sido lida corretamente.
     UC_NAO_CADASTRADA: { texto: 'UC não cadastrada', classe: 'tag tag-warning' },
     UC_SEM_CLIENTE: { texto: 'UC sem cliente vinculado', classe: 'tag tag-warning' },
+    CLIENTE_AMBIGUO: { texto: 'Cliente ambíguo', classe: 'tag tag-error' },
     MULTIPLAS_UCS: { texto: 'Múltiplas UCs possíveis', classe: 'tag tag-warning' },
     CLIENTE_INCOMPATIVEL: { texto: 'Cliente incompatível', classe: 'tag tag-error' },
     UC_NAO_IDENTIFICADA: { texto: 'UC não identificada', classe: 'tag tag-error' },

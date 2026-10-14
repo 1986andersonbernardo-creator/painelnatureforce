@@ -94,8 +94,12 @@ export const observarFaturasDoCliente = (uid, callback) => {
       })
       callback({ ok: true, data: dedupeFaturas(faturas) })
     },
-    () => {
-      callback({ ok: false, message: 'Erro ao buscar faturas.' })
+    (error) => {
+      callback({
+        ok: false,
+        codigo: error?.code || 'firestore/erro',
+        message: error?.message || 'Erro ao buscar faturas.',
+      })
     },
   )
 }
@@ -132,8 +136,12 @@ export const salvarFaturaIdempotente = async (dados) => {
       criadoEm: new Date().toISOString(),
     })
     return { ok: true, id }
-  } catch {
-    return { ok: false, message: 'Erro ao salvar fatura processada.' }
+  } catch (error) {
+    return {
+      ok: false,
+      codigo: error?.code || 'firestore/erro',
+      message: error?.message || 'Erro ao salvar fatura processada.',
+    }
   }
 }
 
