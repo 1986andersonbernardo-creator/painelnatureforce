@@ -4,7 +4,10 @@
 
 import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
 import { test } from 'node:test'
+const require = createRequire(import.meta.url)
+const { resolveLinkedClient } = require('../functions/invoiceLinking.js')
 
 import { identificarFatura, DECISAO, podeAcessarRecurso } from '../src/services/faturaIdentificacao.js'
 import { STATUS_FATURA, MOTIVO_REVISAO } from '../src/services/faturaStatus.js'
@@ -167,6 +170,36 @@ test('Identificação encaminha para revisão quando um ID local aponta para cli
   assert.equal(resultado.decisao, DECISAO.REVISAO_MANUAL)
   assert.equal(resultado.motivo, MOTIVO_REVISAO.CLIENTE_AMBIGUO)
   assert.equal(resultado.cliente, null)
+})
+
+test('Backend resolve perfil canônico pelo vínculo UID e consolida espelhos do mesmo cliente', () => {
+  const canonical = { id: 'cliente-local-1', uid: 'firebase-uid-1', nome: 'Cliente' }
+  const result = resolveLinkedClient(
+    { clienteId: 'firebase-uid-1' },
+    [
+      canonical,
+      { id: 'firebase-uid-1', uid: 'firebase-uid-1', nome: 'Cliente' },
+    ],
+  )
+
+  assert.equal(result.ok, true)
+  assert.equal(result.client.uid, 'firebase-uid-1')
+})
+
+test('Backend recusa publicação quando o vínculo da UC aponta para clientes ambíguos', () => {
+  const result = resolveLinkedClient(
+    { clienteId: 'cliente-local-1' },
+    [
+      { id: 'cliente-local-1', uid: 'firebase-uid-1' },
+      { id: 'cliente-local-1', uid: 'firebase-uid-2' },
+    ],
+  )
+
+  assert.deepEqual(result, {
+    ok: false,
+    reason: 'ambiguous-client',
+    client: null,
+  })
 })
 
 // ===================== 1. Cliente com uma UC =====================

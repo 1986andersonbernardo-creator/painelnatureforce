@@ -7,6 +7,7 @@ const { onDocumentWritten } = require('firebase-functions/v2/firestore')
 const { onCall, HttpsError } = require('firebase-functions/v2/https')
 const { defineSecret } = require('firebase-functions/params')
 const nodemailer = require('nodemailer')
+const { resolveLinkedClient } = require('./invoiceLinking')
 
 initializeApp()
 
@@ -461,18 +462,26 @@ exports.publicarFaturaValidada = onCall(async (request) => {
       ) {
         throw new HttpsError('failed-precondition', 'A UC extraída diverge da UC canônica cadastrada.')
       }
-      const cliente = clientesSnap.docs
-        .map((document) => ({ id: document.id, ...document.data() }))
-        .find((item) =>
-          String(item.uid || '') === String(unidade.clienteId) ||
-          String(item.id) === String(unidade.clienteId),
-        )
-      if (!cliente?.uid || cliente.contaFirebase === false) {
+      const vinculoCliente = resolveLinkedClient(
+        unidade,
+        clientesSnap.docs.map((document) => ({
+          id: document.data().id || document.id,
+          ...document.data(),
+        })),
+      )
+      if (!vinculoCliente.ok) {
+        if (vinculoCliente.reason === 'ambiguous-client') {
+          throw new HttpsError(
+            'failed-precondition',
+            'Há mais de um cadastro associado ao vínculo desta UC. Corrija a ambiguidade antes de publicar.',
+          )
+        }
         throw new HttpsError(
           'failed-precondition',
           'A UC precisa estar vinculada a um cadastro de cliente com acesso autenticado.',
         )
       }
+      const cliente = vinculoCliente.client
       if (!storagePath.startsWith(`faturas/${cliente.uid}/${uc}/`)) {
         throw new HttpsError('permission-denied', 'O PDF não está no caminho privado do cliente vinculado à UC.')
       }

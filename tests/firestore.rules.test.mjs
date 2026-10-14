@@ -42,6 +42,12 @@ beforeEach(async () => {
       status: 'disponivel',
       storagePath: 'faturas/cliente-a/001234/fatura-a.pdf',
     })
+    await setDoc(doc(db, 'faturas', 'fatura-a-2'), {
+      clienteId: 'cliente-a',
+      uc: '002222',
+      status: 'disponivel',
+      storagePath: 'faturas/cliente-a/002222/fatura-a-2.pdf',
+    })
     await setDoc(doc(db, 'faturas', 'fatura-b'), {
       clienteId: 'cliente-b',
       uc: '009876',
@@ -53,6 +59,7 @@ beforeEach(async () => {
       status: 'aguardando revisão',
     })
     await setDoc(doc(db, 'unidades', 'uc-a'), { clienteId: 'cliente-a', numeroUC: '001234' })
+    await setDoc(doc(db, 'unidades', 'uc-a-2'), { clienteId: 'cliente-a', numeroUC: '002222' })
   })
 })
 
@@ -78,7 +85,7 @@ test('consulta do portal precisa restringir status além do UID', async () => {
   const semStatus = query(collection(db, 'faturas'), where('clienteId', '==', 'cliente-a'))
 
   const snapshot = await assertSucceeds(getDocs(autorizada))
-  assert.equal(snapshot.size, 1)
+  assert.equal(snapshot.size, 2)
   await assertFails(getDocs(semStatus))
 })
 
@@ -155,6 +162,13 @@ test('PDF é privado por UID e só fica disponível com fatura publicada vincula
   await assertSucceeds(getBytes(ref(clientA.storage(), path)))
   await assertSucceeds(getDoc(doc(clientANewSession.firestore(), 'faturas', 'fatura-a')))
   await assertSucceeds(getBytes(ref(clientANewSession.storage(), path)))
+  const secondPath = 'faturas/cliente-a/002222/fatura-a-2.pdf'
+  await assertSucceeds(uploadBytes(ref(admin.storage(), secondPath), file, {
+    contentType: 'application/pdf',
+    customMetadata: { faturaId: 'fatura-a-2' },
+  }))
+  await assertSucceeds(getBytes(ref(clientA.storage(), secondPath)))
+  await assertFails(getBytes(ref(clientB.storage(), secondPath)))
   await assertFails(getDoc(doc(clientB.firestore(), 'faturas', 'fatura-a')))
   await assertFails(getBytes(ref(clientB.storage(), path)))
 
