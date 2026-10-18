@@ -50,8 +50,10 @@ service firebase.storage {
           invoiceExists(faturaId) &&
           invoice(faturaId).clienteId == request.auth.uid &&
           invoice(faturaId).uc == unidadeConsumidoraId &&
-          invoice(faturaId).storagePath ==
-            'faturas/' + clienteId + '/' + unidadeConsumidoraId + '/' + arquivo &&
+          (invoice(faturaId).storagePath ==
+            'faturas/' + clienteId + '/' + unidadeConsumidoraId + '/' + arquivo ||
+           invoice(faturaId).get('natureForce', {}).get('storagePath', '') ==
+            'faturas/' + clienteId + '/' + unidadeConsumidoraId + '/' + arquivo) &&
           invoice(faturaId).status == 'disponivel';
       }
 

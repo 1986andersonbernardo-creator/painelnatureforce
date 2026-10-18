@@ -526,6 +526,11 @@ exports.publicarFaturaValidada = onCall(async (request) => {
         administradorEmail: actorEmail,
         operationId,
       }
+      // These fields are only written by the dedicated issuance/settlement handlers.
+      for (const key of ['natureForce', 'pagamentoStatus', 'baixaManual']) {
+        if (existingInvoice?.[key] !== undefined) safeInvoice[key] = existingInvoice[key]
+        else delete safeInvoice[key]
+      }
       delete safeInvoice.statusProcessamento
       delete safeInvoice.pendenteVinculacao
 
@@ -581,7 +586,7 @@ exports.publicarFaturaValidada = onCall(async (request) => {
   return { ok: true, ...resultado, operationId }
 })
 
-const autorizarRemocaoFaturas = async (request) => {
+const autorizarRemocaoFaturas = async (request, deniedOperation = 'INVOICE_DELETE_DENIED') => {
   const actor = authenticated(request)
   const actorEmail = String(actor.token.email || '').toLowerCase()
   const profile = actorEmail
@@ -596,12 +601,12 @@ const autorizarRemocaoFaturas = async (request) => {
       actorUid: actor.uid,
       actorEmail,
       actorRole: actor.token.role || 'unknown',
-      operation: 'INVOICE_DELETE_DENIED',
+      operation: deniedOperation,
       entity: 'faturas',
       entityId: request.data?.faturaId || null,
       result: 'denied',
     })
-    throw new HttpsError('permission-denied', 'A conta não está autorizada a remover faturas.')
+    throw new HttpsError('permission-denied', 'A conta não está autorizada a administrar faturas.')
   }
   return { actor, actorEmail }
 }
@@ -967,3 +972,8 @@ const registrarAlteracao = (colecao, acao) => async (event) => {
 exports.auditClientes = onDocumentWritten('clientes/{documentId}', registrarAlteracao('clientes', 'CLIENT'))
 exports.auditUnidades = onDocumentWritten('unidades/{documentId}', registrarAlteracao('unidades', 'UC'))
 exports.auditFaturas = onDocumentWritten('faturas/{documentId}', registrarAlteracao('faturas', 'INVOICE'))
+
+Object.assign(exports, require('./natureForceHandlers')({
+  onCall, HttpsError, db, bucket: { file: (...args) => getStorage().bucket().file(...args) },
+  authorize: (request) => autorizarRemocaoFaturas(request, 'NATURE_FORCE_ADMIN_DENIED'), FieldValue,
+}))

@@ -29,3 +29,5 @@ serviceAccountKey.json
 *.njsproj
 *.sln
 *.sw?
+artifacts/invoices/
+artifacts/tools/

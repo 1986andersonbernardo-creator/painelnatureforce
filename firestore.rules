@@ -65,8 +65,12 @@ service cloud.firestore {
         (resource.data.status == 'disponivel' &&
          isOwner(resource.data.clienteId));
       allow create: if isAdmin() &&
+        !request.resource.data.keys().hasAny(['natureForce', 'pagamentoStatus', 'baixaManual']) &&
         request.resource.data.status != 'disponivel';
       allow update: if isAdmin() &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny(['natureForce', 'pagamentoStatus', 'baixaManual']) &&
+        (!resource.data.keys().hasAny(['natureForce']) ||
+         !request.resource.data.diff(resource.data).affectedKeys().hasAny(['valorTotal', 'calculo', 'referencia', 'vencimento', 'clienteId', 'ucId', 'uc'])) &&
         ((resource.data.status != 'disponivel' &&
           request.resource.data.status != 'disponivel') ||
          (resource.data.status == 'disponivel' &&
@@ -77,6 +81,16 @@ service cloud.firestore {
           request.resource.data.versao == resource.data.versao &&
           request.resource.data.versaoAtual == resource.data.versaoAtual));
       allow delete: if false;
+    }
+
+    match /faturas/{faturaId}/emissoesNatureForce/{versaoId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /configuracoes/faturamentoNatureForce {
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
     match /processamentoFaturas/{processamentoId} {

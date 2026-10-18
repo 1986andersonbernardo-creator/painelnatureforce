@@ -14,6 +14,7 @@ import {
   registroPertenceAoCliente,
 } from '../../services/persistencia'
 import { ehEmailAdminMaster } from '../../services/adminAccess'
+import { NatureForceSettings, NatureForceEmission } from './NatureForceBilling'
 // Atendimento: as solicitações enviadas pelos clientes precisam chegar à equipe.
 import { observarTodosChamados, atualizarChamado } from '../../firebase/firestore'
 import { listarPaginaAuditoria } from '../../firebase/firestore'
@@ -1967,7 +1968,8 @@ function FaturasSection() {
                 )}
               </div>
               <div className="invoice-actions">
-                <button type="button" onClick={() => publicarFatura(fat.id)}>Publicar p/ cliente</button>
+                <NatureForceEmission invoice={fat} />
+                <button type="button" onClick={() => publicarFatura(fat.id)}>Publicar original da distribuidora</button>
                 <button type="button" onClick={() => removerFaturaComAviso(fat.id)}>Remover</button>
               </div>
             </div>
@@ -1993,6 +1995,7 @@ function FaturasSection() {
         </section>
       )}
 
+      <NatureForceSettings />
       <section className="panel">
         <div className="panel-header compact">
           <div>
@@ -2017,11 +2020,12 @@ function FaturasSection() {
                 )}
                 {fat.calculo && (
                   <small style={{ display: 'block', color: '#166534' }}>
-                    💰 Energia: {formatCurrency(fat.calculo.valorElegivel)} · Desconto 20%: {formatCurrency(fat.calculo.valorDesconto)} · Impostos: {formatCurrency(fat.calculo.impostosTributosEncargos)} · Final: {formatCurrency(fat.calculo.valorFinal)}
+                    💰 Energia: {formatCurrency(fat.calculo.valorElegivel)} · Desconto calculado: {formatCurrency(fat.calculo.valorDesconto)} · Impostos: {formatCurrency(fat.calculo.impostosTributosEncargos)} · Final: {formatCurrency(fat.calculo.valorFinal)}
                   </small>
                 )}
               </div>
               <div className="invoice-actions">
+                <NatureForceEmission invoice={fat} />
                 <button type="button" onClick={() => removerFaturaComAviso(fat.id)}>Remover</button>
               </div>
             </div>

@@ -321,7 +321,7 @@ export function ClienteDashboard() {
               <article className="stat-card success">
                 <span>Economia do mês</span>
                 <strong>{formatCurrency(economiaMes)}</strong>
-                <small>20% de desconto</small>
+                <small>Desconto conforme contratação</small>
               </article>
               <article className="stat-card accent">
                 <span>Economia acumulada</span>
@@ -414,21 +414,22 @@ export function ClienteDashboard() {
               {[...faturas]
                 .sort((a, b) => (a.referencia < b.referencia ? 1 : -1))
                 .map((fat) => {
-                  const calc = fat.calculo
+                  const calc = fat.natureForce ? null : fat.calculo
                   const comp = fat.componentes || {}
                   return (
                     <div key={fat.id} className="invoice-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '12px' }}>
                       <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px 24px' }}>
                         <div style={{ flex: 1 }}>
-                          <strong>{fat.arquivo}</strong>
+                          <strong>{fat.natureForce ? `Fatura Nature Force ${fat.natureForce.numero}` : fat.arquivo}</strong>
                           <small>
                             Referência: {(fat.referencia || 'N/A').replace('2026-', '').replace('2025-', '')}
                           </small>
                           <small>Vencimento: {fat.vencimento ? new Date(fat.vencimento).toLocaleDateString('pt-BR') : '—'}</small>
                           <small>UC: {fat.uc || '—'} · Consumo: {fat.consumo ? `${fat.consumo} kWh` : '—'}</small>
+                          {fat.natureForce && <small>Desconto contratado: {fat.natureForce.percentualDesconto}% · {fat.pagamentoStatus === 'pago' ? 'Pagamento confirmado manualmente' : 'Aguardando conferência do pagamento'}</small>}
                         </div>
                         <div style={{ textAlign: 'right' }}>
-                          <strong>{formatCurrency(calc?.valorFinal || fat.valorTotal || 0)}</strong>
+                          <strong>{formatCurrency(fat.natureForce?.valorAprovado ?? calc?.valorFinal ?? fat.valorTotal ?? 0)}</strong>
                           <small className="tag tag-success">Disponível</small>
                         </div>
                         <div className="invoice-actions">
@@ -438,9 +439,9 @@ export function ClienteDashboard() {
                               const janela = window.open('about:blank', '_blank')
                               if (janela) janela.opener = null
                               try {
-                                const data = fat.storagePath
+                                const data = (fat.natureForce?.storagePath || fat.storagePath)
                                   ? await obterUrlPdfFatura(
-                                      fat.storagePath,
+                                      fat.natureForce?.storagePath || fat.storagePath,
                                       fat.idFatura || fat.firestoreId || fat.id,
                                     )
                                   : null
@@ -470,9 +471,9 @@ export function ClienteDashboard() {
                             type="button"
                             onClick={async () => {
                               try {
-                                const data = fat.storagePath
+                                const data = (fat.natureForce?.storagePath || fat.storagePath)
                                   ? await obterUrlPdfFatura(
-                                      fat.storagePath,
+                                      fat.natureForce?.storagePath || fat.storagePath,
                                       fat.idFatura || fat.firestoreId || fat.id,
                                     )
                                   : null
@@ -484,7 +485,7 @@ export function ClienteDashboard() {
                                 }
                                 const link = document.createElement('a')
                                 link.href = data
-                                link.download = fat.arquivo || 'fatura.pdf'
+                                link.download = fat.natureForce ? `NatureForce-${String(fat.natureForce.numero).replace(/[^a-zA-Z0-9_-]/g, '_')}.pdf` : fat.arquivo || 'fatura.pdf'
                                 link.click()
                                 window.setTimeout(() => URL.revokeObjectURL(data), 60000)
                               } catch (error) {

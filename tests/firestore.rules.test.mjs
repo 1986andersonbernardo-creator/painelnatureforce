@@ -6,7 +6,7 @@ import {
   assertFails,
   assertSucceeds,
 } from '@firebase/rules-unit-testing'
-import { doc, getDoc, getFirestore, setDoc, updateDoc, collection, getDocs, query, where } from 'firebase/firestore'
+import { doc, getDoc, setDoc, updateDoc, collection, getDocs, query, where } from 'firebase/firestore'
 import { getBytes, ref, uploadBytes } from 'firebase/storage'
 
 const projectId = 'demo-natureforce'
@@ -33,7 +33,7 @@ after(async () => {
 beforeEach(async () => {
   await environment.clearFirestore()
   await environment.withSecurityRulesDisabled(async (context) => {
-    const db = getFirestore(context)
+    const db = context.firestore()
     await setDoc(doc(db, 'clientes', 'cliente-a'), { nome: 'Cliente A', emailAcesso: 'a@example.com' })
     await setDoc(doc(db, 'clientes', 'cliente-b'), { nome: 'Cliente B', emailAcesso: 'b@example.com' })
     await setDoc(doc(db, 'faturas', 'fatura-a'), {
@@ -130,7 +130,7 @@ test('claim master em outra conta não concede privilégios de master', async ()
 
 test('perfil administrativo inativo bloqueia token admin ainda válido', async () => {
   await environment.withSecurityRulesDisabled(async (context) => {
-    await setDoc(doc(getFirestore(context), 'usuarios', 'admin@example.com'), {
+    await setDoc(doc(context.firestore(), 'usuarios', 'admin@example.com'), {
       email: 'admin@example.com',
       perfil: 'administrador',
       status: 'inativo',
@@ -182,4 +182,37 @@ test('PDF é privado por UID e só fica disponível com fatura publicada vincula
     contentType: 'application/pdf',
     customMetadata: { faturaId: 'fatura-a' },
   }))
+})
+
+test('emissão e baixa Nature Force são exclusivas do backend, inclusive para admin', async () => {
+  const admin=environment.authenticatedContext('admin-uid',{email:'admin@example.com',admin:true})
+  const client=environment.authenticatedContext('cliente-a',{email:'a@example.com'})
+  for(const context of [admin,client]) {
+    const db=context.firestore()
+    await assertFails(updateDoc(doc(db,'faturas','fatura-a'),{natureForce:{storagePath:'fraude.pdf'}}))
+    await assertFails(updateDoc(doc(db,'faturas','fatura-a'),{pagamentoStatus:'pago'}))
+    await assertFails(setDoc(doc(db,'configuracoes','faturamentoNatureForce'),{pix:{chave:'fraude@example.com'}}))
+    await assertFails(setDoc(doc(db,'faturas','fatura-a','emissoesNatureForce','v1'),{snapshot:{}}))
+  }
+})
+
+test('PDF Nature Force atual permite somente proprietário; versão anterior fica privada', async () => {
+  const admin=environment.authenticatedContext('admin-uid',{email:'admin@example.com',admin:true})
+  const a=environment.authenticatedContext('cliente-a',{email:'a@example.com'})
+  const b=environment.authenticatedContext('cliente-b',{email:'b@example.com'})
+  const anonymous=environment.unauthenticatedContext()
+  const path='faturas/cliente-a/001234/nf_v2.pdf'
+  const previous='faturas/cliente-a/001234/nf_v1.pdf'
+  for(const filePath of [path,previous]) await assertSucceeds(uploadBytes(ref(admin.storage(),filePath),new Uint8Array([37,80,68,70,45]),{
+    contentType:'application/pdf',customMetadata:{faturaId:'fatura-a'},
+  }))
+  await environment.withSecurityRulesDisabled(async context=>{
+    await updateDoc(doc(context.firestore(),'faturas','fatura-a'),{natureForce:{storagePath:path},valorTotal:100})
+  })
+  await assertSucceeds(getBytes(ref(a.storage(),path)))
+  await assertFails(getBytes(ref(b.storage(),path)))
+  await assertFails(getBytes(ref(anonymous.storage(),path)))
+  await assertFails(getBytes(ref(a.storage(),previous)))
+  await assertSucceeds(getBytes(ref(admin.storage(),previous)))
+  await assertFails(updateDoc(doc(admin.firestore(),'faturas','fatura-a'),{valorTotal:1}))
 })

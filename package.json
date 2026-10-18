@@ -8,7 +8,7 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "node --test tests/run-tests.mjs",
+    "test": "node --test tests/run-tests.mjs tests/natureForceInvoice.test.mjs",
     "deploy:rules": "npx --yes firebase-tools deploy --only firestore:rules --project natureforce-65cdc",
     "deploy:indexes": "npx --yes firebase-tools deploy --only firestore:indexes --project natureforce-65cdc",
     "deploy:storage": "npx --yes firebase-tools deploy --only storage --project natureforce-65cdc",
