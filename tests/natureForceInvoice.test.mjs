@@ -196,3 +196,28 @@ test('configuração administrativa valida e audita dados oficiais sem preencher
   assert.equal(saved.pix.chave,'financeiro@example.com');assert.equal(saved.updatedBy,'admin');assert.ok(saved.revision)
   assert.ok([...h.records.values()].some(x=>x.data.operation==='INVOICE_SETTINGS_UPDATED'))
 })
+
+
+test('download não publica nem altera cobranças, aceita paga e usa identificação existente', async () => {
+  const h = harness()
+  const invoice = { ...base().fatura, pagamentoStatus: 'pago', status: 'disponivel' }
+  h.put('faturas/fat_test', invoice)
+  const before = structuredClone([...h.records])
+  const result = await h.handlers.gerarPdfFaturaNatureForce({auth:{role:'admin'},data:{faturaId:'fat_test'}})
+  assert.ok(Buffer.from(result.pdfBase64,'base64').subarray(0,5).equals(Buffer.from('%PDF-')))
+  assert.deepEqual([...h.records], before)
+  assert.equal(h.files.size, 0)
+  const loading = getDocument({data:new Uint8Array(Buffer.from(result.pdfBase64,'base64')), standardFontDataUrl:path.join(path.dirname(require.resolve('pdfjs-dist/package.json')),'standard_fonts').replaceAll('\\','/')+'/'})
+  const pdf = await loading.promise
+  let text = ''
+  for (let i=1;i<=pdf.numPages;i++) text += (await (await pdf.getPage(i)).getTextContent()).items.map(x=>x.str).join(' ')
+  assert.match(text,/fat_test/)
+  assert.match(text,/Pagamento confirmado/)
+  assert.match(text,/99660-0664/)
+  assert.match(text,/natureforceenergiasolar@gmail.com/)
+  assert.match(text,/PIX COPIA E COLA/)
+  await loading.destroy()
+  await assert.rejects(h.handlers.gerarPdfFaturaNatureForce({auth:{role:'client'},data:{faturaId:'fat_test'}}),{code:'permission-denied'})
+  h.put('unidades/u1', {...base().unidade, clienteId:'outro'})
+  await assert.rejects(h.handlers.gerarPdfFaturaNatureForce({auth:{role:'admin'},data:{faturaId:'fat_test'}}),/Vínculo/)
+})

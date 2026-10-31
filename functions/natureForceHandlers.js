@@ -112,6 +112,33 @@ module.exports = function register({ onCall, HttpsError, db, bucket, authorize, 
     }
   })
 
+  // Download uses central records and never writes invoices, versions or Storage.
+  const download = onCall({ timeoutSeconds: 120, memory: '512MiB' }, async (request) => {
+    await authorize(request)
+    const id = String(request.data?.faturaId || '')
+    if (!/^[\w-]{1,120}$/.test(id)) throw new HttpsError('invalid-argument', 'Identificador inválido.')
+    const [invoiceSnap, configSnap, unitsSnap, clientsSnap] = await Promise.all([
+      db.collection('faturas').doc(id).get(), settingsRef.get(),
+      db.collection('unidades').get(), db.collection('clientes').get(),
+    ])
+    if (!invoiceSnap.exists) throw new HttpsError('not-found', 'Cobrança não encontrada.')
+    const invoice = { ...invoiceSnap.data(), id }
+    if (['removida','excluindo','erro_exclusao','historico'].includes(invoice.status)) throw new HttpsError('failed-precondition', 'Cobrança indisponível para download.')
+    const norm = v => String(v ?? '').replace(/\D/g, '')
+    const units = unitsSnap.docs.filter(d => norm(d.get('numeroUC')) === norm(invoice.uc))
+    if (units.length !== 1 || units[0].id !== invoice.ucId) throw new HttpsError('failed-precondition', 'Corrija o vínculo da UC antes de gerar o PDF.')
+    const unit = { ...units[0].data(), id: units[0].id }
+    const linked = resolveLinkedClient(unit, clientsSnap.docs.map(d => ({ ...d.data(), id: d.data().id || d.id })))
+    if (!linked.ok) throw new HttpsError('failed-precondition', 'Vínculo do cliente ausente ou ambíguo.')
+    let snapshot
+    try {
+      snapshot = buildInvoice({ fatura: invoice, unidade: unit, cliente: linked.client,
+        settings: configSnap.data(), generatedAt: new Date().toISOString(), downloadOnly: true })
+    } catch (error) { throw new HttpsError('failed-precondition', error.message) }
+    const bytes = await renderInvoice(snapshot)
+    return { pdfBase64: bytes.toString('base64'), filename: `NatureForce-${id}.pdf` }
+  })
+
   const settle = onCall(async (request) => {
     const { actor } = await authorize(request)
     const id = String(request.data?.faturaId || '')
@@ -127,5 +154,5 @@ module.exports = function register({ onCall, HttpsError, db, bucket, authorize, 
     })
     return { ok:true }
   })
-  return { configurarFaturamentoNatureForce: settings, emitirFaturaNatureForce: emit, baixarFaturaNatureForceManualmente: settle }
+  return { gerarPdfFaturaNatureForce: download, configurarFaturamentoNatureForce: settings, emitirFaturaNatureForce: emit, baixarFaturaNatureForceManualmente: settle }
 }

@@ -3,7 +3,7 @@ const QRCode = require('qrcode')
 const Decimal = require('decimal.js')
 const path = require('node:path')
 
-const TEMPLATE_VERSION = 'nf-a4-1'
+const TEMPLATE_VERSION = 'nf-a4-2'
 const required = (value, label) => {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${label}: dado obrigatório ausente.`)
   if (value.length > 2000) throw new Error(`${label}: texto excede 2000 caracteres.`)
@@ -78,7 +78,7 @@ function pixPayload(settings) {
   return payload + crc16(payload)
 }
 
-function buildInvoice({ fatura, cliente, unidade, settings, approval, history = [], generatedAt }) {
+function buildInvoice({ fatura, cliente, unidade, settings, approval, history = [], generatedAt, downloadOnly = false }) {
   const empresa = validateSettings(settings)
   const uc = required(unidade.numeroUC, 'UC original')
   const normalize = (v) => String(v ?? '').replace(/\D/g, '')
@@ -91,19 +91,20 @@ function buildInvoice({ fatura, cliente, unidade, settings, approval, history = 
   const date = required(fatura.vencimento, 'Vencimento')
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)
   if (!match || new Date(`${date}T12:00:00Z`).toISOString().slice(0, 10) !== date) throw new Error('Vencimento inválido: use AAAA-MM-DD.')
-  if (approval?.confirmed !== true || !approval.actorUid) throw new Error('Aprovação financeira explícita obrigatória.')
+  if (!downloadOnly && (approval?.confirmed !== true || !approval.actorUid)) throw new Error('Aprovação financeira explícita obrigatória.')
   // Existing extraction calculations are suggestions, never proof of approval.
   const registeredTotal = money(fatura.valorTotal)
   if (!decimal(fatura.valorTotal, 'Valor final').eq(registeredTotal)) throw new Error('Valor registrado possui fração de centavo; corrija antes de aprovar.')
-  if (approval.expectedTotal !== registeredTotal) throw new Error('O valor da fatura mudou. Revise e aprove novamente.')
+  if (!downloadOnly && approval.expectedTotal !== registeredTotal) throw new Error('O valor da fatura mudou. Revise e aprove novamente.')
+  approval = downloadOnly ? { numero: fatura.natureForce?.numero || fatura.id, percentualDesconto: fatura.natureForce?.percentualDesconto } : approval
   const total = approval.valorRetificado == null || approval.valorRetificado === '' ? registeredTotal : money(approval.valorRetificado)
   if (approval.valorRetificado != null && approval.valorRetificado !== '' && !decimal(approval.valorRetificado,'Valor retificado').eq(total)) throw new Error('Valor retificado possui fração de centavo.')
   const isCorrection = total !== registeredTotal
   const correctionReason = isCorrection ? required(approval.motivoRetificacao, 'Motivo da retificação financeira') : null
-  const percent = decimal(approval.percentualDesconto, 'Percentual contratado')
-  if (percent.gt(100)) throw new Error('Percentual contratado deve estar entre 0 e 100.')
+  const percent = downloadOnly && approval.percentualDesconto == null ? null : decimal(approval.percentualDesconto, 'Percentual contratado')
+  if (percent?.gt(100)) throw new Error('Percentual contratado deve estar entre 0 e 100.')
   const previouslyApproved = fatura.natureForce?.valorAprovado === registeredTotal
-  if (!isCorrection && !previouslyApproved && fatura.calculo?.valorFinal != null && !decimal(fatura.calculo.valorFinal, 'Valor calculado').eq(total)) {
+  if (!downloadOnly && !isCorrection && !previouslyApproved && fatura.calculo?.valorFinal != null && !decimal(fatura.calculo.valorFinal, 'Valor calculado').eq(total)) {
     throw new Error('Divergência entre valorTotal e calculo.valorFinal. Corrija os registros antes de emitir.')
   }
   const records = new Map()
@@ -123,12 +124,13 @@ function buildInvoice({ fatura, cliente, unidade, settings, approval, history = 
     templateVersion: TEMPLATE_VERSION, generatedAt, empresa,
     cliente: { nome: required(cliente.nome, 'Nome do cliente'), documento: required(cliente.cpfCnpj, 'CPF/CNPJ do cliente'), endereco: required(cliente.endereco, 'Endereço do cliente') },
     uc, referencia: ref, vencimento: date, numero: required(approval.numero, 'Número da fatura'),
-    total, percentualDesconto: percent.toString(),
+    total, percentualDesconto: percent?.toString() ?? null,
+    situacao: downloadOnly ? (fatura.pagamentoStatus === 'pago' ? 'Pagamento confirmado' : 'Aguardando conferência do pagamento') : null,
     consumo: fatura.consumo == null ? null : decimal(fatura.consumo, 'Consumo medido').toString(),
     // No compensated-energy, tariff validity or commercial line items exist in the current schema.
     composicaoDisponivel: false,
     history: [...records].filter(([key]) => key >= lower).sort(([a], [b]) => a.localeCompare(b)).slice(-6).map(([mes, consumo]) => ({ mes, consumo })),
-    approval: { actorUid: approval.actorUid, numero: approval.numero, percentualDesconto: percent.toString(), valorAprovado: total, competencia: ref, confirmedAt: generatedAt,
+    approval: downloadOnly ? null : { actorUid: approval.actorUid, numero: approval.numero, percentualDesconto: percent.toString(), valorAprovado: total, competencia: ref, confirmedAt: generatedAt,
       valorAnterior: registeredTotal, motivoRetificacao: correctionReason, valorCalculadoImportacao: fatura.calculo?.valorFinal == null ? null : String(fatura.calculo.valorFinal) },
     pixPayload: pixPayload(empresa),
   }
@@ -182,8 +184,11 @@ async function renderInvoice(data) {
       flush()
     }
     doc.save().circle(570,-12,117).fill('#438f48').circle(530,-35,130).fill(green).restore()
-    doc.image(path.join(__dirname, 'assets/logo.png'),28,y,{fit:[180,64]})
-    y += 73
+    doc.save().circle(76,y+48,48).fillAndStroke('#ffffff','#105331').restore()
+    doc.save().circle(76,y+48,44).clip()
+    doc.image(path.join(__dirname, 'assets/logo.png'),38,y+10,{fit:[76,76],align:'center',valign:'center'})
+    doc.restore()
+    y += 108
     text('FATURA DE ENERGIA POR ASSINATURA',28,y,265,14,true,green)
     const institution=`${data.empresa.nome}\n${data.empresa.documento}\n${data.empresa.endereco}`
     text(institution,320,y,247,8)
@@ -206,7 +211,9 @@ async function renderInvoice(data) {
       box(28,y,width,75,light);text('VALOR A PAGAR À NATURE FORCE',40,y+9,width-24,11,true,green)
       text(currency(data.total),40,y+29,width-24,27,true,green);y+=87
     }
-    section('RESUMO DA ENERGIA COMPENSADA',`Desconto contratado declarado pelo administrador: ${data.percentualDesconto}% (competência ${data.referencia}).\nComposição da cobrança e energia efetivamente compensada: não disponíveis nos registros atuais. Valor final aprovado administrativamente.\nConsumo medido: ${data.consumo === null ? 'não informado' : `${data.consumo} kWh`}. Economia mensal: não demonstrada.`)
+    if (data.situacao) section('SITUAÇÃO DA COBRANÇA',data.situacao)
+    if (data.approval) {
+    section('RESUMO DA ENERGIA COMPENSADA',`${data.percentualDesconto == null ? 'Percentual contratado: não informado.' : `Desconto contratado declarado pelo administrador: ${data.percentualDesconto}% (competência ${data.referencia}).`}\nComposição da cobrança e energia efetivamente compensada: não disponíveis nos registros atuais. ${data.approval ? 'Valor final aprovado administrativamente.' : 'Valor registrado na cobrança.'}\nConsumo medido: ${data.consumo === null ? 'não informado' : `${data.consumo} kWh`}. Economia mensal: não demonstrada.`)
     ensure(150); box(28,y,330,138);box(368,y,199,138,green)
     text('EVOLUÇÃO DO CONSUMO (kWh)',40,y+10,305,10,true,green)
     if (!data.history.length) text('Histórico não disponível.',40,y+50,300)
@@ -222,11 +229,14 @@ async function renderInvoice(data) {
     }
     text('ECONOMIA ACUMULADA',380,y+15,175,10,true,'#ffffff')
     text('Não demonstrada nos registros.\n\nSaldo de créditos: não informado.',380,y+44,175,10,false,'#ffffff'); y+=150
+    }
     const important=`A conta da distribuidora é separada desta cobrança. Valores devidos à distribuidora: não informados.\n\nApós o pagamento, envie o comprovante e informe sua Unidade Consumidora (UC) para identificação.\n\nA confirmação depende de conferência e baixa manual por administrador.`
     const pixText=`Chave Pix (${data.empresa.pix.tipo}): ${data.empresa.pix.chave}\nTitular: ${data.empresa.pix.titular}\nInforme no banco ${currency(data.total)}.`
     const ph=Math.max(height(important,267,8)+40,height(pixText,216,8)+120)
     ensure(ph+12);box(28,y,291,ph);text('IMPORTANTE',40,y+10,267,10,true,green);text(important,40,y+30,267,8)
     box(329,y,238,ph);text('PAGUE COM PIX',341,y+10,214,11,true,green);doc.image(qr,341,y+29,{width:80});text(pixText,341,y+114,214,8);y+=ph+9
+    section('PIX COPIA E COLA',data.pixPayload)
+    section('CONTATOS NATURE FORCE','Telefone: (81) 99660-0664\nE-mail: natureforceenergiasolar@gmail.com')
     const footer=`Template ${data.templateVersion} • Emitida em ${data.generatedAt}. Histórico: registros existentes dos últimos seis meses; meses ausentes não representam consumo zero.`
     ensure(height(footer,width,7));text(footer,28,y,width,7)
     doc.end()

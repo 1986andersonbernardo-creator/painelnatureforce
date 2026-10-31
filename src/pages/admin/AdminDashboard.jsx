@@ -14,7 +14,7 @@ import {
   registroPertenceAoCliente,
 } from '../../services/persistencia'
 import { ehEmailAdminMaster } from '../../services/adminAccess'
-import { NatureForceSettings, NatureForceEmission } from './NatureForceBilling'
+import { NatureForceSettings, NatureForceEmission, NatureForceDownload } from './NatureForceBilling'
 // Atendimento: as solicitações enviadas pelos clientes precisam chegar à equipe.
 import { observarTodosChamados, atualizarChamado } from '../../firebase/firestore'
 import { listarPaginaAuditoria } from '../../firebase/firestore'
@@ -149,7 +149,7 @@ export function AdminDashboard() {
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'clientes', label: 'Clientes' },
-    { id: 'faturas', label: 'Faturas' },
+    { id: 'faturas', label: 'Financeiro' },
     { id: 'precadastros', label: `Pré-cadastros${preCadastrosPendentes > 0 ? ` (${preCadastrosPendentes})` : ''}` },
     { id: 'revisoes', label: 'Revisões' },
     { id: 'atendimento', label: 'Atendimento' },
@@ -1065,6 +1065,7 @@ function ClientesSection() {
 
 /* ======================== SEÇÃO FATURAS (pipeline de importação) ======================== */
 function FaturasSection() {
+  const [clienteFinanceiro, setClienteFinanceiro] = useState('')
   const {
     getFaturas,
     addFatura,
@@ -1817,7 +1818,7 @@ function FaturasSection() {
       <section className="panel">
         <div className="panel-header compact">
           <div>
-            <span className="eyebrow">Upload de faturas</span>
+            <span className="eyebrow">Financeiro</span>
             <h3>Importação automática (identifica UC, cliente e vincula a fatura)</h3>
           </div>
           <button
@@ -1995,6 +1996,17 @@ function FaturasSection() {
         </section>
       )}
 
+      <section className="panel">
+        <h3>Gerar PDF de uma cobrança</h3>
+        <label>Selecione o cliente <select value={clienteFinanceiro} onChange={e => setClienteFinanceiro(e.target.value)}>
+          <option value="">Selecione</option>
+          {getClientes().map(c => <option key={c.uid || c.id} value={c.uid || c.id}>{c.nome}</option>)}
+        </select></label>
+        {clienteFinanceiro && faturas.filter(f => registroPertenceAoCliente({ registro: f, cliente: getClientes().find(c => String(c.uid || c.id) === clienteFinanceiro) }) && !['removida','excluindo','erro_exclusao','historico'].includes(f.status)).map(f => <div className="invoice-item" key={f.idFatura || f.firestoreId || f.id}>
+          <div><strong>UC {f.uc} · Competência {f.referencia}</strong><small>Vencimento: {f.vencimento || 'Não informado'} · {f.valorTotal == null ? 'Valor não informado' : formatCurrency(f.valorTotal)}</small></div>
+          <NatureForceDownload invoice={f} />
+        </div>)}
+      </section>
       <NatureForceSettings />
       <section className="panel">
         <div className="panel-header compact">

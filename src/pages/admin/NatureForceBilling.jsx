@@ -4,6 +4,29 @@ import app from '../../firebase/config'
 
 const call = async (name, data) => (await httpsCallable(getFunctions(app), name)(data)).data
 
+export function NatureForceDownload({ invoice }) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const download = async () => {
+    setBusy(true); setMessage('')
+    try {
+      const faturaId = String(invoice.idFatura || invoice.firestoreId || invoice.id)
+      const result = await call('gerarPdfFaturaNatureForce', { faturaId })
+      const bytes = Uint8Array.from(atob(result.pdfBase64), c => c.charCodeAt(0))
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }))
+      const link = document.createElement('a')
+      link.href = url; link.download = result.filename
+      document.body.appendChild(link); link.click(); link.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 60000)
+    } catch (error) { setMessage(error.message) }
+    finally { setBusy(false) }
+  }
+  return <details><summary aria-label="Ações da cobrança">⋮</summary>
+    <button type="button" disabled={busy} onClick={download}>{busy ? 'Gerando…' : 'Gerar PDF'}</button>
+    {message && <p role="alert">{message}</p>}
+  </details>
+}
+
 export function NatureForceSettings() {
   const [form, setForm] = useState({ nome:'', documento:'', endereco:'', pix:{ tipo:'', chave:'', titular:'', cidade:'' } })
   const [message,setMessage]=useState('')
